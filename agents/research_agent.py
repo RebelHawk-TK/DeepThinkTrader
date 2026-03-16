@@ -1,0 +1,408 @@
+"""Research Agent — Gathers news, Reddit sentiment, and technical data for a ticker.
+
+Uses Alpaca Market Data API as primary source (with X-Request-ID capture),
+falling back to yfinance if Alpaca data is unavailable.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta
+
+import praw
+import yfinance as yf
+from newsapi import NewsApiClient
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+
+from config import Config
+from utils.alpaca_data import AlpacaMarketData
+from utils.database import Database
+from utils.twelve_data import TwelveData
+from utils.yahoo_fundamentals import YahooFundamentals
+
+logger = logging.getLogger(__name__)
+
+
+class ResearchAgent:
+    def __init__(self, db: Database | None = None):
+        self.config = Config()
+        self.db = db or Database()
+        self.alpaca_data = AlpacaMarketData(self.db)
+        self.twelve_data = TwelveData() if self.config.RAPIDAPI_KEY else None
+        self.yahoo_fundamentals = YahooFundamentals()
+        self.newsapi = NewsApiClient(api_key=self.config.NEWSAPI_KEY)
+        self.vader = SentimentIntensityAnalyzer()
+
+        # Reddit is optional — skip if credentials not configured
+        if self.config.REDDIT_CLIENT_ID and self.config.REDDIT_CLIENT_ID != "your_reddit_client_id":
+            self.reddit = praw.Reddit(
+                client_id=self.config.REDDIT_CLIENT_ID,
+                client_secret=self.config.REDDIT_CLIENT_SECRET,
+                user_agent=self.config.REDDIT_USER_AGENT,
+            )
+            logger.info("Reddit (PRAW) initialized")
+        else:
+            self.reddit = None
+            logger.info("Reddit credentials not set — skipping sentiment analysis")
+
+    def fetch_news(self, ticker: str, hours: int = 24) -> list[dict]:
+        """Fetch recent news articles for a ticker from NewsAPI."""
+        try:
+            from_date = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d")
+            response = self.newsapi.get_everything(
+                q=ticker,
+                from_param=from_date,
+                language="en",
+                sort_by="relevancy",
+                page_size=20,
+            )
+            articles = []
+            for article in response.get("articles", [])[:10]:
+                title = article.get("title", "")
+                description = article.get("description", "")
+                text = f"{title}. {description}"
+                sentiment = self.vader.polarity_scores(text)
+                impact = round(sentiment["compound"] * 10, 1)  # Scale -10 to +10
+                articles.append({
+                    "title": title,
+                    "source": article.get("source", {}).get("name", "Unknown"),
+                    "published_at": article.get("publishedAt", ""),
+                    "description": description,
+                    "url": article.get("url", ""),
+                    "impact_score": impact,
+                })
+            return articles
+        except Exception as e:
+            logger.error(f"NewsAPI error for {ticker}: {e}")
+            return []
+
+    def fetch_reddit_sentiment(self, ticker: str, hours: int = 6) -> dict:
+        """Scrape Reddit for mentions and sentiment of a ticker."""
+        if self.reddit is None:
+            return {
+                "ticker": ticker,
+                "post_count": 0,
+                "overall_sentiment": 0.0,
+                "top_posts": [],
+                "themes": ["Reddit not configured"],
+            }
+
+        posts = []
+        overall_scores = []
+
+        for sub_name in self.config.SUBREDDITS:
+            try:
+                subreddit = self.reddit.subreddit(sub_name)
+                for post in subreddit.hot(limit=50):
+                    title_lower = post.title.lower()
+                    ticker_lower = ticker.lower()
+                    # Check if ticker is mentioned in title or selftext
+                    if ticker_lower in title_lower or f"${ticker_lower}" in title_lower:
+                        sentiment = self.vader.polarity_scores(post.title)
+                        score = sentiment["compound"]
+                        overall_scores.append(score)
+                        posts.append({
+                            "subreddit": sub_name,
+                            "title": post.title,
+                            "score": post.score,
+                            "num_comments": post.num_comments,
+                            "sentiment": round(score, 3),
+                            "url": f"https://reddit.com{post.permalink}",
+                        })
+
+                        # Also check top comments
+                        post.comments.replace_more(limit=0)
+                        for comment in post.comments[:5]:
+                            body = comment.body[:500]
+                            if ticker_lower in body.lower():
+                                c_sentiment = self.vader.polarity_scores(body)
+                                overall_scores.append(c_sentiment["compound"])
+            except Exception as e:
+                logger.error(f"Reddit error for r/{sub_name}: {e}")
+
+        avg_sentiment = round(sum(overall_scores) / len(overall_scores), 3) if overall_scores else 0.0
+
+        # Identify key themes
+        themes = []
+        all_text = " ".join(p["title"].lower() for p in posts)
+        theme_keywords = {
+            "short squeeze": "short squeeze talk",
+            "fomo": "retail FOMO",
+            "moon": "moonshot hype",
+            "earnings": "earnings play",
+            "overvalued": "overvaluation concern",
+            "undervalued": "undervaluation thesis",
+            "dip": "buy the dip sentiment",
+            "bear": "bearish sentiment",
+            "bull": "bullish sentiment",
+        }
+        for keyword, theme in theme_keywords.items():
+            if keyword in all_text:
+                themes.append(theme)
+
+        return {
+            "ticker": ticker,
+            "post_count": len(posts),
+            "overall_sentiment": avg_sentiment,
+            "top_posts": posts[:20],
+            "themes": themes if themes else ["low Reddit activity"],
+        }
+
+    def fetch_technicals(self, ticker: str) -> dict:
+        """Fetch technicals via Alpaca Market Data API (primary), yfinance (fallback).
+
+        Alpaca calls capture X-Request-ID for every request.
+        """
+        # Primary: Alpaca Market Data
+        result = self.alpaca_data.get_technicals(ticker)
+        if "error" not in result:
+            logger.info(f"Technicals for {ticker} sourced from Alpaca")
+            return result
+
+        # Fallback: yfinance
+        logger.warning(f"Alpaca data unavailable for {ticker}, falling back to yfinance")
+        try:
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="1mo")
+
+            if hist.empty:
+                return {"ticker": ticker, "error": "No data available", "source": "yfinance"}
+
+            current = hist.iloc[-1]
+            prev = hist.iloc[-2] if len(hist) > 1 else current
+
+            sma_10 = round(hist["Close"].tail(10).mean(), 2)
+            sma_20 = round(hist["Close"].tail(20).mean(), 2)
+
+            avg_volume = int(hist["Volume"].mean())
+            current_volume = int(current["Volume"])
+
+            delta = hist["Close"].diff()
+            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs))
+            current_rsi = round(rsi.iloc[-1], 1) if not rsi.empty else 50.0
+
+            return {
+                "ticker": ticker,
+                "source": "yfinance",
+                "current_price": round(current["Close"], 2),
+                "previous_close": round(prev["Close"], 2),
+                "daily_change_pct": round(
+                    ((current["Close"] - prev["Close"]) / prev["Close"]) * 100, 2
+                ),
+                "current_volume": current_volume,
+                "avg_volume": avg_volume,
+                "volume_ratio": round(current_volume / avg_volume, 2) if avg_volume > 0 else 0,
+                "sma_10": sma_10,
+                "sma_20": sma_20,
+                "rsi_14": current_rsi,
+                "above_sma_10": current["Close"] > sma_10,
+                "above_sma_20": current["Close"] > sma_20,
+                "high_52w": round(hist["Close"].max(), 2),
+                "low_52w": round(hist["Close"].min(), 2),
+            }
+        except Exception as e:
+            logger.error(f"yfinance error for {ticker}: {e}")
+            return {"ticker": ticker, "error": str(e), "source": "yfinance"}
+
+    def generate_report(self, ticker: str) -> dict:
+        """Generate a full research report combining all sources."""
+        logger.info(f"Generating research report for {ticker}...")
+
+        news = self.fetch_news(ticker)
+        reddit = self.fetch_reddit_sentiment(ticker)
+        technicals = self.fetch_technicals(ticker)
+
+        # Fetch advanced technicals from Twelve Data
+        advanced_technicals = {}
+        if self.twelve_data:
+            try:
+                advanced_technicals = self.twelve_data.get_full_technicals(ticker)
+            except Exception as e:
+                logger.error(f"Twelve Data error for {ticker}: {e}")
+
+        # Fetch Yahoo Finance fundamentals
+        fundamentals = {}
+        try:
+            fundamentals = self.yahoo_fundamentals.get_fundamentals(ticker)
+        except Exception as e:
+            logger.error(f"Yahoo fundamentals error for {ticker}: {e}")
+
+        # Calculate combined scores
+        news_impact = (
+            round(sum(a["impact_score"] for a in news) / len(news), 1) if news else 0
+        )
+        reddit_score = reddit["overall_sentiment"]
+
+        # Combined catalyst score: news 30%, reddit 20%, basic technicals 20%, advanced 30%
+        tech_score = 0
+        if "error" not in technicals:
+            if technicals.get("rsi_14", 50) < 30:
+                tech_score = 0.5
+            elif technicals.get("rsi_14", 50) > 70:
+                tech_score = -0.5
+            if technicals.get("above_sma_10"):
+                tech_score += 0.3
+            if technicals.get("volume_ratio", 1) > 1.5:
+                tech_score += 0.2
+
+        # Advanced technicals score from Twelve Data
+        adv_score = 0
+        if advanced_technicals:
+            macd = advanced_technicals.get("macd", {})
+            if macd.get("crossover") == "bullish":
+                adv_score += 0.4
+            elif macd.get("crossover") == "bearish":
+                adv_score -= 0.4
+            elif macd.get("trend") == "bullish":
+                adv_score += 0.15
+            elif macd.get("trend") == "bearish":
+                adv_score -= 0.15
+
+            ema = advanced_technicals.get("ema", {})
+            if ema.get("crossover") == "bullish":
+                adv_score += 0.3
+            elif ema.get("crossover") == "bearish":
+                adv_score -= 0.3
+
+            stoch = advanced_technicals.get("stoch", {})
+            if stoch.get("zone") == "oversold" and stoch.get("crossover") == "bullish":
+                adv_score += 0.3
+            elif stoch.get("zone") == "overbought" and stoch.get("crossover") == "bearish":
+                adv_score -= 0.3
+
+            adx = advanced_technicals.get("adx", {})
+            if adx.get("trend_strength") in ("strong", "very_strong"):
+                # Amplify existing signal when trend is strong
+                adv_score *= 1.3
+
+        combined = round(
+            (news_impact / 10 * 0.3)
+            + (reddit_score * 0.2)
+            + (tech_score * 0.2)
+            + (adv_score * 0.3),
+            3,
+        )
+
+        # Identify risks and opportunities
+        risks = []
+        opportunities = []
+
+        if news_impact < -3:
+            risks.append("Strongly negative news sentiment")
+        if reddit_score < -0.3:
+            risks.append("Negative Reddit sentiment — potential retail selloff")
+        if technicals.get("rsi_14", 50) > 70:
+            risks.append("RSI overbought — potential pullback")
+        if technicals.get("volume_ratio", 1) < 0.5:
+            risks.append("Low volume — weak conviction in current move")
+
+        # Advanced technical risks/opportunities
+        if advanced_technicals:
+            macd = advanced_technicals.get("macd", {})
+            if macd.get("crossover") == "bearish":
+                risks.append("MACD bearish crossover — momentum shifting down")
+            elif macd.get("crossover") == "bullish":
+                opportunities.append("MACD bullish crossover — momentum shifting up")
+
+            bbands = advanced_technicals.get("bbands", {})
+            current_price = technicals.get("current_price", 0)
+            if bbands and current_price:
+                if current_price > bbands.get("upper", float("inf")):
+                    risks.append(f"Price above Bollinger upper band — overextended")
+                elif current_price < bbands.get("lower", 0):
+                    opportunities.append(f"Price below Bollinger lower band — potential snap-back")
+                if bbands.get("bandwidth_pct", 10) < 5:
+                    opportunities.append("Bollinger squeeze — breakout imminent")
+
+            stoch = advanced_technicals.get("stoch", {})
+            if stoch.get("zone") == "overbought":
+                risks.append(f"Stochastic overbought ({stoch.get('k', 0):.0f})")
+            elif stoch.get("zone") == "oversold":
+                opportunities.append(f"Stochastic oversold ({stoch.get('k', 0):.0f}) — bounce setup")
+
+            ema = advanced_technicals.get("ema", {})
+            if ema.get("crossover") == "bullish":
+                opportunities.append("EMA 9/21 bullish crossover — short-term uptrend")
+            elif ema.get("crossover") == "bearish":
+                risks.append("EMA 9/21 bearish crossover — short-term downtrend")
+
+            adx = advanced_technicals.get("adx", {})
+            if adx.get("trend_strength") == "weak":
+                risks.append("ADX weak — no clear trend, range-bound market")
+
+        if news_impact > 3:
+            opportunities.append("Strong positive news catalyst")
+        if reddit_score > 0.3:
+            opportunities.append("Positive Reddit buzz — potential retail inflow")
+        if technicals.get("rsi_14", 50) < 30:
+            opportunities.append("RSI oversold — potential bounce")
+        if technicals.get("above_sma_10") and technicals.get("above_sma_20"):
+            opportunities.append("Price above key moving averages — uptrend intact")
+
+        # Fundamental risks/opportunities from Yahoo Finance
+        if fundamentals:
+            earnings = fundamentals.get("earnings", {})
+            if earnings.get("imminent"):
+                risks.append(f"Earnings in {earnings.get('days_until', '?')} days — high event risk")
+
+            analyst = fundamentals.get("analyst", {})
+            upside = analyst.get("upside_pct")
+            if upside is not None:
+                if upside > 20:
+                    opportunities.append(f"Analyst target implies {upside}% upside")
+                elif upside < -10:
+                    risks.append(f"Analyst target implies {abs(upside)}% downside")
+
+            if analyst.get("recommendation") in ("strong_buy", "buy"):
+                opportunities.append(f"Analyst consensus: {analyst['recommendation']}")
+            elif analyst.get("recommendation") in ("sell", "strong_sell"):
+                risks.append(f"Analyst consensus: {analyst['recommendation']}")
+
+            insider = fundamentals.get("insider", {})
+            if insider.get("signal") == "net_buying":
+                opportunities.append("Insider net buying — management bullish")
+            elif insider.get("signal") == "net_selling":
+                risks.append("Insider net selling — management cashing out")
+
+            fins = fundamentals.get("financials", {})
+            pe = fins.get("pe_ratio")
+            if pe and pe > 50:
+                risks.append(f"High P/E ratio ({pe:.0f}) — expensive valuation")
+            elif pe and pe < 15 and pe > 0:
+                opportunities.append(f"Low P/E ratio ({pe:.0f}) — value opportunity")
+
+            rev_growth = fins.get("revenue_growth")
+            if rev_growth and rev_growth > 0.2:
+                opportunities.append(f"Strong revenue growth ({rev_growth*100:.0f}%)")
+            elif rev_growth and rev_growth < -0.05:
+                risks.append(f"Revenue declining ({rev_growth*100:.0f}%)")
+
+        # Pad to at least 3 each
+        while len(risks) < 3:
+            risks.append("No additional risk factors identified")
+        while len(opportunities) < 3:
+            opportunities.append("No additional opportunity factors identified")
+
+        report = {
+            "ticker": ticker,
+            "timestamp": datetime.now().isoformat(),
+            "news_impact_score": news_impact,
+            "reddit_sentiment_score": reddit_score,
+            "combined_catalyst_score": combined,
+            "news_articles": news[:5],
+            "reddit_data": reddit,
+            "technicals": technicals,
+            "advanced_technicals": advanced_technicals,
+            "fundamentals": fundamentals,
+            "risks": risks[:7],
+            "opportunities": opportunities[:5],
+        }
+
+        # Save to database
+        self.db.save_research(ticker, report)
+        logger.info(f"Research report saved for {ticker} (catalyst: {combined})")
+
+        return report

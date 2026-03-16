@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.deepthinktrader.dashboard</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/rebelhawk/Library/Python/3.9/bin/streamlit</string>
+        <string>run</string>
+        <string>/Users/rebelhawk/Documents/Claude/StockTrader/dashboard.py</string>
+        <string>--server.port</string>
+        <string>8501</string>
+        <string>--server.headless</string>
+        <string>true</string>
+        <string>--browser.gatherUsageStats</string>
+        <string>false</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/rebelhawk/Documents/Claude/StockTrader</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>/Users/rebelhawk/Documents/Claude/StockTrader/dashboard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rebelhawk/Documents/Claude/StockTrader/dashboard_error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/Users/rebelhawk/Library/Python/3.9/bin</string>
+    </dict>
+</dict>
+</plist>

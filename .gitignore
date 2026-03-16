@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+*.db
+*.log
+.DS_Store
+venv/
+.venv/
+.trader.pid
+.dashboard.pid
