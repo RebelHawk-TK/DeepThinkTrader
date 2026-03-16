@@ -95,9 +95,9 @@ class DeepThinkTrader:
                 logger.info(f"Position closed: {ex['ticker']} — {ex['reason']} | P&L: ${ex['pnl']:.2f}")
 
         for ticker in tickers:
-            # Skip if already analyzed recently (within research interval)
-            if self.db.was_recently_analyzed(ticker, minutes=self.config.RESEARCH_INTERVAL_MINUTES - 5):
-                logger.info(f"Skipping {ticker} — already analyzed recently")
+            # Skip if already analyzed today (prevent duplicates across long cycles)
+            if self.db.was_recently_analyzed(ticker, minutes=720):  # 12 hours
+                logger.info(f"Skipping {ticker} — already analyzed today")
                 continue
 
             try:
