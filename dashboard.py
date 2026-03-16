@@ -56,18 +56,38 @@ def get_alpaca_positions():
 
 @st.cache_data(ttl=60)
 def get_portfolio_history():
+    headers = {
+        "APCA-API-KEY-ID": config.ALPACA_API_KEY,
+        "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
+    }
+    # Try intraday first (15min bars for today)
     try:
         resp = http_requests.get(
             f"{config.ALPACA_BASE_URL}/v2/account/portfolio/history",
-            headers={
-                "APCA-API-KEY-ID": config.ALPACA_API_KEY,
-                "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
-            },
-            params={"period": "1M", "timeframe": "1D"},
+            headers=headers,
+            params={"period": "1A", "timeframe": "1D", "intraday_reporting": "market_hours", "pnl_reset": "per_day"},
             timeout=10,
         )
         if resp.ok:
-            return resp.json()
+            data = resp.json()
+            # Filter out zero-equity days (before account was funded)
+            if data.get("equity"):
+                timestamps = data.get("timestamp", [])
+                equities = data.get("equity", [])
+                pnls = data.get("profit_loss", [])
+                # Keep only non-zero entries
+                filtered_ts = []
+                filtered_eq = []
+                filtered_pnl = []
+                for i, eq in enumerate(equities):
+                    if eq and eq > 0:
+                        filtered_ts.append(timestamps[i])
+                        filtered_eq.append(eq)
+                        filtered_pnl.append(pnls[i] if i < len(pnls) else 0)
+                data["timestamp"] = filtered_ts
+                data["equity"] = filtered_eq
+                data["profit_loss"] = filtered_pnl
+            return data
     except Exception:
         pass
     return None
@@ -138,15 +158,29 @@ if portfolio_hist and portfolio_hist.get("equity"):
             "profit_loss": pnls if pnls else [0] * len(equities),
         })
 
+        # Append current live equity so chart always reflects real-time
+        from datetime import datetime as dt
+        now_row = pd.DataFrame({
+            "date": [pd.Timestamp(dt.now())],
+            "equity": [equity],
+            "profit_loss": [total_pnl],
+        })
+        # Only append if different from last row
+        if df_port.iloc[-1]["equity"] != equity:
+            df_port = pd.concat([df_port, now_row], ignore_index=True)
+
+        # Color line based on performance
+        line_color = "#4CAF50" if equity >= starting_balance else "#F44336"
+
         fig_port = go.Figure()
         fig_port.add_trace(go.Scatter(
             x=df_port["date"],
             y=df_port["equity"],
             mode="lines+markers",
             name="Portfolio Value",
-            line=dict(color="#2196F3", width=3),
+            line=dict(color=line_color, width=3),
             fill="tozeroy",
-            fillcolor="rgba(33, 150, 243, 0.1)",
+            fillcolor="rgba(76, 175, 80, 0.1)" if equity >= starting_balance else "rgba(244, 67, 54, 0.1)",
         ))
         fig_port.add_hline(
             y=starting_balance,
@@ -154,8 +188,13 @@ if portfolio_hist and portfolio_hist.get("equity"):
             line_color="gray",
             annotation_text=f"Starting Balance (${starting_balance:,.0f})",
         )
+        # Set Y-axis range around the data so changes are visible
+        min_eq = min(df_port["equity"])
+        max_eq = max(df_port["equity"])
+        padding = max((max_eq - min_eq) * 0.3, 500)  # At least $500 padding
         fig_port.update_layout(
             yaxis_title="Portfolio Value ($)",
+            yaxis_range=[min_eq - padding, max_eq + padding],
             xaxis_title="Date",
             height=400,
             margin=dict(l=0, r=0, t=30, b=0),
@@ -231,6 +270,15 @@ st.subheader("Trade History")
 if all_trades:
     df_trades = pd.DataFrame(all_trades)
 
+    # Calculate invested amount (quantity * entry_price) before formatting
+    if "quantity" in df_trades.columns and "entry_price" in df_trades.columns:
+        df_trades["invested"] = df_trades.apply(
+            lambda r: f"${r['quantity'] * r['entry_price']:,.2f}"
+            if r["quantity"] and r["entry_price"] and r["entry_price"] > 0
+            else "—",
+            axis=1,
+        )
+
     # Format prices as dollar amounts
     for col in ["entry_price", "exit_price", "stop_loss_price", "take_profit_price"]:
         if col in df_trades.columns:
@@ -243,7 +291,7 @@ if all_trades:
         )
 
     display_cols = [
-        "ticker", "action", "quantity", "entry_price", "stop_loss_price",
+        "ticker", "action", "quantity", "entry_price", "invested", "stop_loss_price",
         "take_profit_price", "exit_price", "conviction", "pnl", "status", "timestamp",
     ]
     available_cols = [c for c in display_cols if c in df_trades.columns]
