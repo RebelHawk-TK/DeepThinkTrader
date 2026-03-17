@@ -378,8 +378,7 @@ class AIDeepThinkAgent:
             result["conviction"] = max(1.0, min(10.0, float(result["conviction"])))
             return result
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse AI response as JSON: {e}")
-            logger.debug(f"Raw response: {text[:500]}")
+            logger.error(f"Failed to parse AI response as JSON: {e} | First 200 chars: {cleaned[:200]}")
             return None
 
     def analyze(self, report: dict) -> dict:
@@ -392,20 +391,27 @@ class AIDeepThinkAgent:
 
             response = self.client.messages.create(
                 model="claude-haiku-4-5",
-                max_tokens=2048,
+                max_tokens=4096,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
             )
 
-            # Extract text from response
-            text = ""
+            # Extract text from response — collect all text blocks
+            text_parts = []
             for block in response.content:
                 if block.type == "text":
-                    text = block.text
-                    break
+                    text_parts.append(block.text)
+            text = "\n".join(text_parts)
 
             if not text:
-                logger.warning(f"Empty AI response for {ticker}, falling back to rules")
+                # Log what we actually got back
+                block_types = [block.type for block in response.content]
+                logger.warning(
+                    f"No text in AI response for {ticker}. "
+                    f"Stop reason: {response.stop_reason}, "
+                    f"Block types: {block_types}, "
+                    f"Usage: in={response.usage.input_tokens} out={response.usage.output_tokens}"
+                )
                 return self.fallback.analyze(report)
 
             analysis = self._parse_response(text, ticker)
