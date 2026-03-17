@@ -228,10 +228,22 @@ class DeepThinkAgent:
         bull_strength = sum(f["strength"] for f in bullish)
         bear_strength = sum(f["strength"] for f in bearish)
 
-        # Net factor strength
-        net = bull_strength - bear_strength
-        # Normalize: catalyst score adds up to 2 points
-        conviction = 5 + (net / max(bull_strength + bear_strength, 1)) * 4 + catalyst * 2
+        # Count strong signals (strength >= 6)
+        strong_bull = sum(1 for f in bullish if f["strength"] >= 6)
+        strong_bear = sum(1 for f in bearish if f["strength"] >= 6)
+
+        # Base: ratio of bull vs bear strength, centered at 5
+        total = max(bull_strength + bear_strength, 1)
+        ratio = bull_strength / total  # 0 to 1, 0.5 = balanced
+        base = ratio * 10  # 0 to 10
+
+        # Bonus for strong confirming signals
+        signal_bonus = (strong_bull - strong_bear) * 0.5
+
+        # Catalyst amplifier (scaled up — 0.3 catalyst = 1.5 points)
+        catalyst_bonus = catalyst * 5
+
+        conviction = base + signal_bonus + catalyst_bonus
         return round(max(1, min(10, conviction)), 1)
 
     def analyze(self, report: dict) -> dict:

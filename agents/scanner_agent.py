@@ -27,10 +27,21 @@ logger = logging.getLogger(__name__)
 # Well-known large-cap tickers to filter against (avoid penny stocks)
 VALID_EXCHANGES = {"NYSE", "NASDAQ", "ARCA", "BATS", "AMEX", "IEX"}
 
-# Skip ETFs that aren't SPY/QQQ, leveraged products, etc.
+# Skip inverse ETFs, leveraged products, and volatility instruments
 SKIP_TICKERS = {
+    # Leveraged bull/bear
     "SQQQ", "TQQQ", "UVXY", "SPXS", "SPXL", "SOXL", "SOXS",
     "LABU", "LABD", "NUGT", "DUST", "JNUG", "JDST", "TVIX",
+    # Inverse ETFs (go up when market goes down — confuses bullish signals)
+    "SPDN", "SH", "PSQ", "DOG", "RWM", "SDS", "QID", "SDOW",
+    "SRTY", "SARK", "HIBS", "BERZ",
+    # 3x leveraged (too volatile for bot)
+    "TZA", "TNA", "UPRO", "SPXU", "TECL", "TECS", "FAS", "FAZ",
+    "ERX", "ERY", "CURE", "DRIP", "GUSH", "NAIL", "DRV",
+    # Volatility products
+    "UVIX", "SVIX", "VXX", "VIXY", "SVXY",
+    # Leveraged single-stock ETFs
+    "TSLL", "TSLG", "NVDL", "NVDS", "AMDL",
 }
 
 # Minimum price and volume thresholds
