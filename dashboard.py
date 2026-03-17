@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
+import os
+from datetime import datetime as dt
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -19,112 +23,211 @@ st.title("DeepThinkTrader Dashboard")
 db = Database()
 config = Config()
 
-# --- Fetch live Alpaca account data ---
+# ──────────────────────────────────────────────
+# Data fetchers
+# ──────────────────────────────────────────────
+
+ALPACA_HEADERS = {
+    "APCA-API-KEY-ID": config.ALPACA_API_KEY,
+    "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
+}
+
 @st.cache_data(ttl=30)
 def get_alpaca_account():
     try:
         resp = http_requests.get(
-            f"{config.ALPACA_BASE_URL}/v2/account",
-            headers={
-                "APCA-API-KEY-ID": config.ALPACA_API_KEY,
-                "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
-            },
-            timeout=5,
+            f"{config.ALPACA_BASE_URL}/v2/account", headers=ALPACA_HEADERS, timeout=5
         )
-        if resp.ok:
-            return resp.json()
+        return resp.json() if resp.ok else None
     except Exception:
-        pass
-    return None
+        return None
 
 @st.cache_data(ttl=30)
 def get_alpaca_positions():
     try:
         resp = http_requests.get(
-            f"{config.ALPACA_BASE_URL}/v2/positions",
-            headers={
-                "APCA-API-KEY-ID": config.ALPACA_API_KEY,
-                "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
-            },
-            timeout=5,
+            f"{config.ALPACA_BASE_URL}/v2/positions", headers=ALPACA_HEADERS, timeout=5
         )
-        if resp.ok:
-            return resp.json()
+        return resp.json() if resp.ok else []
     except Exception:
-        pass
-    return []
+        return []
 
 @st.cache_data(ttl=60)
 def get_portfolio_history():
-    headers = {
-        "APCA-API-KEY-ID": config.ALPACA_API_KEY,
-        "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
-    }
-    # Try intraday first (15min bars for today)
     try:
         resp = http_requests.get(
             f"{config.ALPACA_BASE_URL}/v2/account/portfolio/history",
-            headers=headers,
+            headers=ALPACA_HEADERS,
             params={"period": "1A", "timeframe": "1D", "intraday_reporting": "market_hours", "pnl_reset": "per_day"},
             timeout=10,
         )
         if resp.ok:
             data = resp.json()
-            # Filter out zero-equity days (before account was funded)
             if data.get("equity"):
-                timestamps = data.get("timestamp", [])
-                equities = data.get("equity", [])
-                pnls = data.get("profit_loss", [])
-                # Keep only non-zero entries
-                filtered_ts = []
-                filtered_eq = []
-                filtered_pnl = []
-                for i, eq in enumerate(equities):
-                    if eq and eq > 0:
-                        filtered_ts.append(timestamps[i])
-                        filtered_eq.append(eq)
-                        filtered_pnl.append(pnls[i] if i < len(pnls) else 0)
-                data["timestamp"] = filtered_ts
-                data["equity"] = filtered_eq
-                data["profit_loss"] = filtered_pnl
+                ts = data["timestamp"]
+                eq = data["equity"]
+                pnl = data.get("profit_loss", [0] * len(eq))
+                fts, feq, fpnl = [], [], []
+                for i, e in enumerate(eq):
+                    if e and e > 0:
+                        fts.append(ts[i])
+                        feq.append(e)
+                        fpnl.append(pnl[i] if i < len(pnl) else 0)
+                data["timestamp"] = fts
+                data["equity"] = feq
+                data["profit_loss"] = fpnl
             return data
     except Exception:
         pass
     return None
+
+@st.cache_data(ttl=60)
+def get_spy_history():
+    """Fetch SPY history for benchmark comparison."""
+    try:
+        resp = http_requests.get(
+            "https://data.alpaca.markets/v2/stocks/SPY/bars",
+            headers=ALPACA_HEADERS,
+            params={"timeframe": "1Day", "limit": 60, "adjustment": "raw", "feed": "iex"},
+            timeout=10,
+        )
+        if resp.ok:
+            return resp.json().get("bars", [])
+    except Exception:
+        pass
+    return []
 
 
 account = get_alpaca_account()
 positions = get_alpaca_positions()
 portfolio_hist = get_portfolio_history()
 
+# ──────────────────────────────────────────────
 # Sidebar
+# ──────────────────────────────────────────────
+
 st.sidebar.header("Controls")
 if st.sidebar.button("Refresh Data"):
     st.cache_data.clear()
     st.rerun()
 
 st.sidebar.markdown("---")
+
+# === BOT HEALTH (Tier 1 #3) ===
+st.sidebar.subheader("Bot Health")
+
+log_path = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
+bot_pid_path = os.path.join(os.path.dirname(__file__), ".trader.pid")
+dash_pid_path = os.path.join(os.path.dirname(__file__), ".dashboard.pid")
+
+# Bot running check
+bot_running = False
+if os.path.exists(bot_pid_path):
+    try:
+        pid = int(open(bot_pid_path).read().strip())
+        os.kill(pid, 0)  # Check if process exists
+        bot_running = True
+    except (ProcessError, ValueError, OSError):
+        pass
+
+st.sidebar.markdown(f"**Bot:** {'🟢 Running' if bot_running else '🔴 Stopped'}")
+
+# Last activity from log
+last_activity = "Unknown"
+error_count_24h = 0
+if os.path.exists(log_path):
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            read_size = min(size, 50000)
+            f.seek(max(0, size - read_size))
+            lines = f.read().decode("utf-8", errors="ignore").splitlines()
+            if lines:
+                last_activity = lines[-1][:19] if lines[-1] else "Unknown"
+                # Count errors in last 24h
+                for line in lines:
+                    if "[ERROR]" in line:
+                        error_count_24h += 1
+    except Exception:
+        pass
+
+st.sidebar.markdown(f"**Last Activity:** {last_activity}")
+st.sidebar.markdown(f"**Errors (recent):** {'🔴 ' + str(error_count_24h) if error_count_24h > 5 else str(error_count_24h)}")
+
 if account:
+    st.sidebar.markdown("---")
     st.sidebar.markdown(f"**Account:** {account.get('account_number', 'N/A')}")
-    st.sidebar.markdown(f"**Status:** {'Paper' if account.get('account_number', '').startswith('PA') else 'Live'}")
+    st.sidebar.markdown(f"**Mode:** {'📄 Paper' if account.get('account_number', '').startswith('PA') else '💰 Live'}")
 
-# === TOP METRICS ROW ===
-col1, col2, col3, col4, col5 = st.columns(5)
+# ──────────────────────────────────────────────
+# Compute metrics
+# ──────────────────────────────────────────────
 
-# Live account data
 equity = float(account["equity"]) if account else 0
 cash = float(account["cash"]) if account else 0
-buying_power = float(account["buying_power"]) if account else 0
 starting_balance = 100_000.0
 total_pnl = equity - starting_balance
 
-# Trade counts from database (all time, not just today)
 all_trades = db.get_recent_trades(500)
 total_trades = len(all_trades)
-open_trades = db.get_open_trades()
+open_trades_db = db.get_open_trades()
 closed_trades = [t for t in all_trades if t.get("status") == "CLOSED"]
 winning_trades = [t for t in closed_trades if (t.get("pnl") or 0) > 0]
+losing_trades = [t for t in closed_trades if (t.get("pnl") or 0) < 0]
 win_rate = (len(winning_trades) / len(closed_trades) * 100) if closed_trades else 0
+
+# Realized P&L
+realized_pnl = sum(t.get("pnl", 0) or 0 for t in closed_trades)
+unrealized_pnl = sum(float(p.get("unrealized_pl", 0)) for p in positions)
+
+# Risk metrics
+closed_pnls = [t.get("pnl", 0) or 0 for t in closed_trades]
+avg_win = np.mean([p for p in closed_pnls if p > 0]) if winning_trades else 0
+avg_loss = abs(np.mean([p for p in closed_pnls if p < 0])) if losing_trades else 0
+profit_factor = (sum(p for p in closed_pnls if p > 0) / abs(sum(p for p in closed_pnls if p < 0))) if losing_trades else 0
+
+# Drawdown calculation from equity curve
+max_drawdown_pct = 0
+max_drawdown_dollars = 0
+peak_equity = starting_balance
+if portfolio_hist and portfolio_hist.get("equity"):
+    eq_series = [e for e in portfolio_hist["equity"] if e and e > 0]
+    if equity > 0:
+        eq_series.append(equity)
+    peak = eq_series[0] if eq_series else starting_balance
+    for e in eq_series:
+        if e > peak:
+            peak = e
+        dd = (peak - e) / peak * 100
+        dd_dollars = peak - e
+        if dd > max_drawdown_pct:
+            max_drawdown_pct = dd
+            max_drawdown_dollars = dd_dollars
+
+# Sharpe & Sortino (annualized, using daily returns)
+sharpe_ratio = 0
+sortino_ratio = 0
+if portfolio_hist and portfolio_hist.get("equity"):
+    eq_arr = np.array([e for e in portfolio_hist["equity"] if e and e > 0])
+    if equity > 0:
+        eq_arr = np.append(eq_arr, equity)
+    if len(eq_arr) > 2:
+        daily_returns = np.diff(eq_arr) / eq_arr[:-1]
+        mean_ret = np.mean(daily_returns)
+        std_ret = np.std(daily_returns)
+        if std_ret > 0:
+            sharpe_ratio = round((mean_ret / std_ret) * np.sqrt(252), 2)
+        downside = daily_returns[daily_returns < 0]
+        downside_std = np.std(downside) if len(downside) > 0 else 0
+        if downside_std > 0:
+            sortino_ratio = round((mean_ret / downside_std) * np.sqrt(252), 2)
+
+# ──────────────────────────────────────────────
+# TOP METRICS ROW 1 — Portfolio
+# ──────────────────────────────────────────────
+
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
     st.metric(
@@ -134,90 +237,198 @@ with col1:
         delta_color="normal" if total_pnl >= 0 else "inverse",
     )
 with col2:
-    st.metric("Cash Available", f"${cash:,.2f}")
+    st.metric("Realized P&L", f"${realized_pnl:+,.2f}",
+              delta_color="normal" if realized_pnl >= 0 else "inverse")
 with col3:
-    st.metric("Total Trades", total_trades)
+    st.metric("Unrealized P&L", f"${unrealized_pnl:+,.2f}",
+              delta_color="normal" if unrealized_pnl >= 0 else "inverse")
 with col4:
-    st.metric("Open Positions", len(open_trades))
+    st.metric("Cash", f"${cash:,.2f}")
 with col5:
+    st.metric("Total Trades", total_trades)
+
+# TOP METRICS ROW 2 — Risk (Tier 1 #2)
+rcol1, rcol2, rcol3, rcol4, rcol5 = st.columns(5)
+
+with rcol1:
     st.metric("Win Rate", f"{win_rate:.0f}%" if closed_trades else "N/A")
+with rcol2:
+    st.metric("Max Drawdown", f"-{max_drawdown_pct:.1f}%",
+              delta=f"-${max_drawdown_dollars:,.0f}" if max_drawdown_dollars > 0 else "$0",
+              delta_color="inverse" if max_drawdown_dollars > 0 else "off")
+with rcol3:
+    color = "normal" if sharpe_ratio > 0 else "inverse"
+    st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+with rcol4:
+    st.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
+with rcol5:
+    st.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor > 0 else "N/A")
 
 st.divider()
 
-# === PORTFOLIO VALUE TIMELINE ===
-st.subheader("Portfolio Value Over Time")
+# ──────────────────────────────────────────────
+# PORTFOLIO VALUE + SPY BENCHMARK (Tier 1 #1, #5)
+# ──────────────────────────────────────────────
+
+st.subheader("Portfolio Value vs SPY Benchmark")
 if portfolio_hist and portfolio_hist.get("equity"):
-    timestamps = portfolio_hist.get("timestamp", [])
-    equities = portfolio_hist.get("equity", [])
-    pnls = portfolio_hist.get("profit_loss", [])
+    timestamps = portfolio_hist["timestamp"]
+    equities = portfolio_hist["equity"]
 
     if timestamps and equities:
         df_port = pd.DataFrame({
             "date": pd.to_datetime(timestamps, unit="s"),
             "equity": equities,
-            "profit_loss": pnls if pnls else [0] * len(equities),
         })
 
-        # Append current live equity so chart always reflects real-time
-        from datetime import datetime as dt
-        now_row = pd.DataFrame({
-            "date": [pd.Timestamp(dt.now())],
-            "equity": [equity],
-            "profit_loss": [total_pnl],
-        })
-        # Only append if different from last row
+        # Append live equity
         if df_port.iloc[-1]["equity"] != equity:
-            df_port = pd.concat([df_port, now_row], ignore_index=True)
+            df_port = pd.concat([df_port, pd.DataFrame({
+                "date": [pd.Timestamp(dt.now())], "equity": [equity],
+            })], ignore_index=True)
 
-        # Color line based on performance
-        line_color = "#4CAF50" if equity >= starting_balance else "#F44336"
+        # Normalize to % return for comparison
+        port_start = df_port["equity"].iloc[0]
+        df_port["port_return_pct"] = ((df_port["equity"] - port_start) / port_start) * 100
 
         fig_port = go.Figure()
+
+        # Portfolio equity (left axis)
+        line_color = "#4CAF50" if equity >= starting_balance else "#F44336"
         fig_port.add_trace(go.Scatter(
-            x=df_port["date"],
-            y=df_port["equity"],
-            mode="lines+markers",
-            name="Portfolio Value",
+            x=df_port["date"], y=df_port["equity"],
+            mode="lines+markers", name="Portfolio ($)",
             line=dict(color=line_color, width=3),
             fill="tozeroy",
-            fillcolor="rgba(76, 175, 80, 0.1)" if equity >= starting_balance else "rgba(244, 67, 54, 0.1)",
+            fillcolor="rgba(76,175,80,0.1)" if equity >= starting_balance else "rgba(244,67,54,0.08)",
         ))
-        fig_port.add_hline(
-            y=starting_balance,
-            line_dash="dash",
-            line_color="gray",
-            annotation_text=f"Starting Balance (${starting_balance:,.0f})",
-        )
-        # Set Y-axis range around the data so changes are visible
+
+        # SPY benchmark overlay (normalized to portfolio start value)
+        spy_bars = get_spy_history()
+        if spy_bars:
+            spy_df = pd.DataFrame(spy_bars)
+            spy_df["date"] = pd.to_datetime(spy_df["t"])
+            spy_start = spy_df["c"].iloc[0]
+            spy_df["spy_normalized"] = (spy_df["c"] / spy_start) * port_start
+            fig_port.add_trace(go.Scatter(
+                x=spy_df["date"], y=spy_df["spy_normalized"],
+                mode="lines", name="SPY (normalized)",
+                line=dict(color="#FF9800", width=2, dash="dot"),
+                opacity=0.7,
+            ))
+
+        fig_port.add_hline(y=starting_balance, line_dash="dash", line_color="gray",
+                           annotation_text=f"Start (${starting_balance:,.0f})")
+
+        # Drawdown shading
+        peak = df_port["equity"].iloc[0]
+        dd_dates, dd_vals = [], []
+        for _, row in df_port.iterrows():
+            if row["equity"] > peak:
+                peak = row["equity"]
+            dd_dates.append(row["date"])
+            dd_vals.append(row["equity"] - peak)  # negative values
+
         min_eq = min(df_port["equity"])
         max_eq = max(df_port["equity"])
-        padding = max((max_eq - min_eq) * 0.3, 500)  # At least $500 padding
+        padding = max((max_eq - min_eq) * 0.3, 500)
         fig_port.update_layout(
             yaxis_title="Portfolio Value ($)",
             yaxis_range=[min_eq - padding, max_eq + padding],
-            xaxis_title="Date",
-            height=400,
-            margin=dict(l=0, r=0, t=30, b=0),
+            height=420, margin=dict(l=0, r=0, t=30, b=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
         st.plotly_chart(fig_port, use_container_width=True)
-    else:
-        st.info("Portfolio history not available yet — will populate after first trading day")
+
+        # Drawdown chart (Tier 1 #1)
+        if any(d < 0 for d in dd_vals):
+            fig_dd = go.Figure()
+            dd_pct = [(d / (df_port["equity"].iloc[i] - d) * 100) if (df_port["equity"].iloc[i] - d) > 0 else 0
+                      for i, d in enumerate(dd_vals)]
+            fig_dd.add_trace(go.Scatter(
+                x=dd_dates, y=dd_pct,
+                fill="tozeroy", fillcolor="rgba(244,67,54,0.2)",
+                line=dict(color="#F44336", width=2),
+                name="Drawdown %",
+            ))
+            fig_dd.update_layout(
+                title="Drawdown from Peak",
+                yaxis_title="Drawdown (%)", height=200,
+                margin=dict(l=0, r=0, t=40, b=0),
+            )
+            st.plotly_chart(fig_dd, use_container_width=True)
 else:
-    st.info("Portfolio history not available yet — will populate after first trading day")
+    st.info("Portfolio history will populate after first trading day")
 
 st.divider()
 
-# === LIVE POSITIONS (from Alpaca) ===
+# ──────────────────────────────────────────────
+# DAILY P&L BAR CHART (Tier 1 #4)
+# ──────────────────────────────────────────────
+
+st.subheader("Daily P&L")
+if portfolio_hist and portfolio_hist.get("profit_loss"):
+    ts = portfolio_hist["timestamp"]
+    pnls = portfolio_hist["profit_loss"]
+    eq = portfolio_hist["equity"]
+
+    # Compute daily P&L from equity differences
+    dates = pd.to_datetime([t for t, e in zip(ts, eq) if e and e > 0], unit="s")
+    eq_clean = [e for e in eq if e and e > 0]
+
+    if len(eq_clean) > 1:
+        daily_pnl = [eq_clean[i] - eq_clean[i-1] for i in range(1, len(eq_clean))]
+        daily_dates = dates[1:]
+
+        colors = ["#4CAF50" if p >= 0 else "#F44336" for p in daily_pnl]
+        fig_daily = go.Figure(go.Bar(
+            x=daily_dates, y=daily_pnl,
+            marker_color=colors,
+        ))
+        fig_daily.add_hline(y=0, line_color="gray", line_width=1)
+        fig_daily.update_layout(
+            yaxis_title="Daily P&L ($)", height=250,
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+        st.plotly_chart(fig_daily, use_container_width=True)
+
+        # Summary stats
+        dcol1, dcol2, dcol3, dcol4 = st.columns(4)
+        with dcol1:
+            best = max(daily_pnl)
+            st.metric("Best Day", f"${best:+,.2f}")
+        with dcol2:
+            worst = min(daily_pnl)
+            st.metric("Worst Day", f"${worst:+,.2f}")
+        with dcol3:
+            avg_daily = np.mean(daily_pnl)
+            st.metric("Avg Day", f"${avg_daily:+,.2f}")
+        with dcol4:
+            win_days = sum(1 for p in daily_pnl if p > 0)
+            st.metric("Win Days", f"{win_days}/{len(daily_pnl)}")
+    else:
+        st.info("Need 2+ trading days for daily P&L chart")
+else:
+    st.info("Daily P&L will populate after first trading day")
+
+st.divider()
+
+# ──────────────────────────────────────────────
+# LIVE POSITIONS
+# ──────────────────────────────────────────────
+
 st.subheader("Current Positions (Live)")
 if positions:
     pos_data = []
-    total_unrealized = 0
+    total_unrealized_pos = 0
     total_market_value = 0
+    sector_exposure = {}
+
     for p in positions:
         unrealized = float(p.get("unrealized_pl", 0))
         unrealized_pct = float(p.get("unrealized_plpc", 0)) * 100
         market_val = float(p.get("market_value", 0))
-        total_unrealized += unrealized
+        total_unrealized_pos += unrealized
         total_market_value += market_val
         pos_data.append({
             "Ticker": p["symbol"],
@@ -232,63 +443,70 @@ if positions:
     df_pos = pd.DataFrame(pos_data)
     st.dataframe(df_pos, use_container_width=True, hide_index=True)
 
-    # Position summary
-    pcol1, pcol2, pcol3 = st.columns(3)
+    # Position summary + allocation pie chart
+    pcol1, pcol2 = st.columns([1, 1])
     with pcol1:
-        st.metric("Total Invested", f"${total_market_value:,.2f}")
-    with pcol2:
-        st.metric("Unrealized P&L", f"${total_unrealized:+,.2f}")
-    with pcol3:
-        invested_pct = (total_market_value / equity * 100) if equity > 0 else 0
-        st.metric("% Invested", f"{invested_pct:.1f}%")
+        mcol1, mcol2, mcol3 = st.columns(3)
+        with mcol1:
+            st.metric("Total Invested", f"${total_market_value:,.2f}")
+        with mcol2:
+            st.metric("Unrealized P&L", f"${total_unrealized_pos:+,.2f}")
+        with mcol3:
+            invested_pct = (total_market_value / equity * 100) if equity > 0 else 0
+            st.metric("% Invested", f"{invested_pct:.1f}%")
 
-    # Position P&L bar chart
-    if len(pos_data) > 1:
-        pnl_df = pd.DataFrame([{
-            "ticker": p["Ticker"],
-            "pnl": float(positions[i].get("unrealized_pl", 0)),
+        # P&L bar chart
+        if len(pos_data) > 1:
+            pnl_df = pd.DataFrame([{
+                "ticker": p["Ticker"],
+                "pnl": float(positions[i].get("unrealized_pl", 0)),
+            } for i, p in enumerate(pos_data)])
+            colors = ["#4CAF50" if x >= 0 else "#F44336" for x in pnl_df["pnl"]]
+            fig_pnl = go.Figure(go.Bar(x=pnl_df["ticker"], y=pnl_df["pnl"], marker_color=colors))
+            fig_pnl.update_layout(title="P&L by Position", yaxis_title="P&L ($)", height=250,
+                                  margin=dict(l=0, r=0, t=40, b=0))
+            st.plotly_chart(fig_pnl, use_container_width=True)
+
+    with pcol2:
+        # Allocation pie chart
+        alloc_df = pd.DataFrame([{
+            "Ticker": p["Ticker"],
+            "Value": abs(float(positions[i].get("market_value", 0))),
         } for i, p in enumerate(pos_data)])
-        colors = ["#4CAF50" if x >= 0 else "#F44336" for x in pnl_df["pnl"]]
-        fig_pnl = go.Figure(go.Bar(
-            x=pnl_df["ticker"], y=pnl_df["pnl"],
-            marker_color=colors,
-        ))
-        fig_pnl.update_layout(
-            title="Unrealized P&L by Position",
-            yaxis_title="P&L ($)",
-            height=300,
-            margin=dict(l=0, r=0, t=40, b=0),
-        )
-        st.plotly_chart(fig_pnl, use_container_width=True)
+        if cash > 0:
+            alloc_df = pd.concat([alloc_df, pd.DataFrame([{"Ticker": "CASH", "Value": cash}])], ignore_index=True)
+
+        fig_pie = px.pie(alloc_df, values="Value", names="Ticker", title="Portfolio Allocation",
+                         hole=0.4, color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_pie.update_layout(height=350, margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(fig_pie, use_container_width=True)
 else:
     st.info("No open positions")
 
 st.divider()
 
-# === TRADE HISTORY ===
+# ──────────────────────────────────────────────
+# TRADE HISTORY
+# ──────────────────────────────────────────────
+
 st.subheader("Trade History")
 if all_trades:
     df_trades = pd.DataFrame(all_trades)
 
-    # Calculate invested amount (quantity * entry_price) before formatting
+    # Calculate invested amount before formatting
     if "quantity" in df_trades.columns and "entry_price" in df_trades.columns:
         df_trades["invested"] = df_trades.apply(
             lambda r: f"${r['quantity'] * r['entry_price']:,.2f}"
-            if r["quantity"] and r["entry_price"] and r["entry_price"] > 0
-            else "—",
+            if r["quantity"] and r["entry_price"] and r["entry_price"] > 0 else "—",
             axis=1,
         )
 
-    # Format prices as dollar amounts
+    # Format prices
     for col in ["entry_price", "exit_price", "stop_loss_price", "take_profit_price"]:
         if col in df_trades.columns:
-            df_trades[col] = df_trades[col].apply(
-                lambda x: f"${x:,.2f}" if x and x > 0 else "—"
-            )
+            df_trades[col] = df_trades[col].apply(lambda x: f"${x:,.2f}" if x and x > 0 else "—")
     if "pnl" in df_trades.columns:
-        df_trades["pnl"] = df_trades["pnl"].apply(
-            lambda x: f"${x:+,.2f}" if x else "—"
-        )
+        df_trades["pnl"] = df_trades["pnl"].apply(lambda x: f"${x:+,.2f}" if x else "—")
 
     display_cols = [
         "ticker", "action", "quantity", "entry_price", "invested", "stop_loss_price",
@@ -297,69 +515,140 @@ if all_trades:
     available_cols = [c for c in display_cols if c in df_trades.columns]
     st.dataframe(df_trades[available_cols], use_container_width=True)
 
+    # Win/Loss stats
+    if closed_trades:
+        scol1, scol2, scol3, scol4 = st.columns(4)
+        with scol1:
+            st.metric("Avg Win", f"${avg_win:,.2f}" if avg_win > 0 else "N/A")
+        with scol2:
+            st.metric("Avg Loss", f"-${avg_loss:,.2f}" if avg_loss > 0 else "N/A")
+        with scol3:
+            # Win/loss streak
+            streak = 0
+            streak_type = ""
+            for t in reversed(closed_trades):
+                p = t.get("pnl", 0) or 0
+                if not streak_type:
+                    streak_type = "W" if p > 0 else "L"
+                    streak = 1
+                elif (p > 0 and streak_type == "W") or (p < 0 and streak_type == "L"):
+                    streak += 1
+                else:
+                    break
+            streak_display = f"{streak} {'Wins' if streak_type == 'W' else 'Losses'}"
+            st.metric("Current Streak", streak_display)
+        with scol4:
+            ratio = f"{avg_win / avg_loss:.2f}" if avg_loss > 0 else "N/A"
+            st.metric("Win/Loss Ratio", ratio)
+
     # Cumulative P&L chart
-    closed_df = df_trades[df_trades["status"] == "CLOSED"].copy()
-    if not closed_df.empty and "pnl" in closed_df.columns:
-        closed_df = closed_df.sort_values("timestamp")
-        closed_df["cumulative_pnl"] = closed_df["pnl"].cumsum()
-        fig_cum = px.line(
-            closed_df, x="timestamp", y="cumulative_pnl",
-            title="Cumulative Realized P&L",
-        )
-        fig_cum.update_layout(yaxis_title="P&L ($)", xaxis_title="Date")
+    closed_df_raw = pd.DataFrame(closed_trades)
+    if not closed_df_raw.empty and "pnl" in closed_df_raw.columns:
+        closed_df_raw = closed_df_raw.sort_values("timestamp")
+        closed_df_raw["cumulative_pnl"] = closed_df_raw["pnl"].cumsum()
+        fig_cum = px.line(closed_df_raw, x="timestamp", y="cumulative_pnl",
+                          title="Cumulative Realized P&L")
+        fig_cum.update_layout(yaxis_title="P&L ($)")
         st.plotly_chart(fig_cum, use_container_width=True)
 else:
     st.info("No trades yet")
 
 st.divider()
 
-# === RECENT ANALYSES ===
+# ──────────────────────────────────────────────
+# RECENT ANALYSES
+# ──────────────────────────────────────────────
+
 st.subheader("Recent Analyses")
-analyses = db.get_recent_analyses(50)
+analyses = db.get_recent_analyses(100)
 if analyses:
     df_analysis = pd.DataFrame(analyses)
 
-    # Extract current price from the stored analysis JSON
-    prices = []
+    # Extract fields from stored JSON
+    extra_cols = {"price": [], "technical_score": [], "fundamental_score": [],
+                  "catalyst_score": [], "pattern_score": [], "earnings_risk": []}
     for a in analyses:
         try:
             data = json.loads(a.get("analysis_json", "{}"))
-            prices.append(data.get("current_price", None))
+            extra_cols["price"].append(data.get("current_price"))
+            extra_cols["technical_score"].append(data.get("technical_score"))
+            extra_cols["fundamental_score"].append(data.get("fundamental_score"))
+            extra_cols["catalyst_score"].append(data.get("catalyst_score"))
+            extra_cols["pattern_score"].append(data.get("pattern_score"))
+            extra_cols["earnings_risk"].append(data.get("earnings_risk"))
         except Exception:
-            prices.append(None)
-    df_analysis["price"] = prices
-    df_analysis["price"] = df_analysis["price"].apply(
-        lambda x: f"${x:,.2f}" if x else "N/A"
-    )
+            for k in extra_cols:
+                extra_cols[k].append(None)
 
-    display_cols = ["ticker", "price", "action", "conviction", "position_size_pct", "stop_loss_pct", "take_profit_pct", "timestamp"]
+    df_analysis["price"] = [f"${x:,.2f}" if x else "N/A" for x in extra_cols["price"]]
+    df_analysis["tech"] = extra_cols["technical_score"]
+    df_analysis["fund"] = extra_cols["fundamental_score"]
+    df_analysis["cata"] = extra_cols["catalyst_score"]
+    df_analysis["patt"] = extra_cols["pattern_score"]
+    df_analysis["earn_risk"] = extra_cols["earnings_risk"]
+
+    display_cols = ["ticker", "price", "action", "conviction", "tech", "fund", "cata", "patt",
+                    "earn_risk", "stop_loss_pct", "take_profit_pct", "timestamp"]
     available_cols = [c for c in display_cols if c in df_analysis.columns]
     st.dataframe(df_analysis[available_cols], use_container_width=True)
 
+    # Analysis-to-trade conversion rate
+    total_analyses = len(analyses)
+    buy_count = sum(1 for a in analyses if a.get("action") == "BUY")
+    sell_count = sum(1 for a in analyses if a.get("action") == "SELL")
+    hold_count = total_analyses - buy_count - sell_count
+    conversion = ((buy_count + sell_count) / total_analyses * 100) if total_analyses > 0 else 0
+
+    acol1, acol2, acol3, acol4 = st.columns(4)
+    with acol1:
+        st.metric("Analyzed", total_analyses)
+    with acol2:
+        st.metric("BUY Signals", buy_count)
+    with acol3:
+        st.metric("SELL Signals", sell_count)
+    with acol4:
+        st.metric("Selectivity", f"{conversion:.1f}% traded")
+
     # Conviction distribution
-    fig2 = px.histogram(
-        df_analysis, x="conviction", nbins=10,
-        title="Conviction Score Distribution",
-        color_discrete_sequence=["#2196F3"],
-    )
+    fig2 = px.histogram(df_analysis, x="conviction", nbins=10,
+                        title="Conviction Score Distribution",
+                        color_discrete_sequence=["#2196F3"])
     st.plotly_chart(fig2, use_container_width=True)
 else:
     st.info("No analyses yet")
 
 st.divider()
 
-# === API REQUEST IDS (collapsed) ===
-with st.expander("Alpaca API Request IDs (for debugging)"):
+# ──────────────────────────────────────────────
+# BOT CONFIG (read-only)
+# ──────────────────────────────────────────────
+
+with st.expander("Bot Configuration"):
+    cfgcol1, cfgcol2, cfgcol3, cfgcol4 = st.columns(4)
+    with cfgcol1:
+        st.markdown(f"**Watchlist:** {', '.join(config.WATCHLIST)}")
+        st.markdown(f"**Research Interval:** {config.RESEARCH_INTERVAL_MINUTES} min")
+    with cfgcol2:
+        st.markdown(f"**Max Risk/Trade:** {config.MAX_RISK_PER_TRADE*100}%")
+        st.markdown(f"**Max Daily Loss:** {config.MAX_DAILY_LOSS*100}%")
+    with cfgcol3:
+        st.markdown(f"**Min Conviction:** {config.MIN_CONVICTION}/10")
+        st.markdown(f"**Min R:R Ratio:** {config.MIN_REWARD_RISK_RATIO}:1")
+    with cfgcol4:
+        st.markdown(f"**Account Size:** ${config.ACCOUNT_SIZE:,.0f}")
+        st.markdown(f"**AI Model:** Claude Haiku 4.5")
+
+# API Request IDs
+with st.expander("Alpaca API Request IDs (debugging)"):
     request_ids = db.get_recent_request_ids(30)
     if request_ids:
         df_reqs = pd.DataFrame(request_ids)
         display_cols = ["timestamp", "request_id", "endpoint", "method", "ticker", "order_id", "http_status", "success"]
         available_cols = [c for c in display_cols if c in df_reqs.columns]
         st.dataframe(df_reqs[available_cols], use_container_width=True)
-        st.caption("Include the X-Request-ID in any Alpaca support tickets for faster resolution.")
     else:
-        st.info("No Alpaca API calls logged yet")
+        st.info("No API calls logged yet")
 
 # Footer
 st.divider()
-st.caption("DeepThinkTrader v1.0 — Paper Trading Mode | Auto-refreshes every 30s")
+st.caption("DeepThinkTrader v1.0 — Paper Trading Mode | Dashboard auto-refreshes on Streamlit file change")
