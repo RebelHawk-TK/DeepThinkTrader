@@ -10,7 +10,6 @@ from datetime import datetime
 import schedule
 
 from agents.deepthink_agent import DeepThinkAgent
-from agents.ai_deepthink_agent import AIDeepThinkAgent
 from agents.execution_agent import ExecutionAgent
 from agents.research_agent import ResearchAgent
 from agents.scanner_agent import ScannerAgent
@@ -34,13 +33,8 @@ class DeepThinkTrader:
         self.config = Config()
         self.db = Database()
         self.research = ResearchAgent(self.db)
-        # Use AI-powered analysis if Anthropic key is set, otherwise rule-based
-        if self.config.ANTHROPIC_API_KEY:
-            self.deepthink = AIDeepThinkAgent(self.db)
-            logger.info("Using AI-powered DeepThink (Claude API)")
-        else:
-            self.deepthink = DeepThinkAgent(self.db)
-            logger.info("Using rule-based DeepThink (no Anthropic key)")
+        self.deepthink = DeepThinkAgent(self.db)
+        logger.info("Using rule-based DeepThink analysis")
         self.execution = ExecutionAgent(self.db)
         self.scanner = ScannerAgent(self.db)
         self._last_scan_date: str = ""
