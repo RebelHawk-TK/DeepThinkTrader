@@ -107,9 +107,34 @@ portfolio_hist = get_portfolio_history()
 # ──────────────────────────────────────────────
 
 st.sidebar.header("Controls")
-if st.sidebar.button("Refresh Data"):
+
+# Auto-refresh with adjustable interval
+auto_refresh = st.sidebar.toggle("Auto Refresh", value=True)
+refresh_interval = st.sidebar.select_slider(
+    "Refresh interval",
+    options=[10, 15, 30, 60, 120, 300],
+    value=30,
+    format_func=lambda x: f"{x}s" if x < 60 else f"{x//60}m",
+)
+
+if st.sidebar.button("Refresh Now"):
     st.cache_data.clear()
     st.rerun()
+
+if auto_refresh:
+    import time as _time
+    _placeholder = st.sidebar.empty()
+    _placeholder.caption(f"Next refresh in {refresh_interval}s")
+    _time.sleep(0)  # non-blocking
+    st.cache_data.clear()
+    # Use st.rerun with a fragment to auto-refresh after interval
+    import streamlit.components.v1 as components
+    components.html(
+        f"""<script>
+            setTimeout(function(){{ window.parent.location.reload(); }}, {refresh_interval * 1000});
+        </script>""",
+        height=0,
+    )
 
 st.sidebar.markdown("---")
 
