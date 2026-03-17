@@ -264,6 +264,42 @@ with rcol4:
 with rcol5:
     st.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor > 0 else "N/A")
 
+# TOP METRICS ROW 3 — Rolling Performance (Tier 2 #10)
+if closed_trades:
+    def rolling_stats(trades, days):
+        cutoff = dt.now().isoformat()[:10]
+        try:
+            from datetime import timedelta
+            cutoff_dt = dt.now() - timedelta(days=days)
+            cutoff_str = cutoff_dt.isoformat()
+        except Exception:
+            return None, None
+        recent = [t for t in trades if (t.get("timestamp") or "") >= cutoff_str]
+        if not recent:
+            return 0, 0
+        wins = sum(1 for t in recent if (t.get("pnl") or 0) > 0)
+        wr = (wins / len(recent) * 100) if recent else 0
+        pnl = sum(t.get("pnl", 0) or 0 for t in recent)
+        return round(wr), round(pnl, 2)
+
+    wr7, pnl7 = rolling_stats(closed_trades, 7)
+    wr30, pnl30 = rolling_stats(closed_trades, 30)
+    wr90, pnl90 = rolling_stats(closed_trades, 90)
+
+    pcol1, pcol2, pcol3, pcol4, pcol5, pcol6 = st.columns(6)
+    with pcol1:
+        st.metric("7d Win Rate", f"{wr7}%" if wr7 is not None else "N/A")
+    with pcol2:
+        st.metric("7d P&L", f"${pnl7:+,.2f}" if pnl7 is not None else "N/A")
+    with pcol3:
+        st.metric("30d Win Rate", f"{wr30}%" if wr30 is not None else "N/A")
+    with pcol4:
+        st.metric("30d P&L", f"${pnl30:+,.2f}" if pnl30 is not None else "N/A")
+    with pcol5:
+        st.metric("90d Win Rate", f"{wr90}%" if wr90 is not None else "N/A")
+    with pcol6:
+        st.metric("90d P&L", f"${pnl90:+,.2f}" if pnl90 is not None else "N/A")
+
 st.divider()
 
 # ──────────────────────────────────────────────
@@ -468,7 +504,7 @@ if positions:
             st.plotly_chart(fig_pnl, use_container_width=True)
 
     with pcol2:
-        # Allocation pie chart
+        # Allocation pie chart + sector breakdown (Tier 2 #9)
         alloc_df = pd.DataFrame([{
             "Ticker": p["Ticker"],
             "Value": abs(float(positions[i].get("market_value", 0))),
@@ -478,20 +514,106 @@ if positions:
 
         fig_pie = px.pie(alloc_df, values="Value", names="Ticker", title="Portfolio Allocation",
                          hole=0.4, color_discrete_sequence=px.colors.qualitative.Set2)
-        fig_pie.update_layout(height=350, margin=dict(l=0, r=0, t=40, b=0))
+        fig_pie.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
         st.plotly_chart(fig_pie, use_container_width=True)
+
+        # Sector exposure (Tier 2 #9)
+        @st.cache_data(ttl=3600)
+        def get_sectors(tickers):
+            import yfinance as yf
+            sectors = {}
+            for t in tickers:
+                try:
+                    info = yf.Ticker(t).info
+                    sectors[t] = info.get("sector", "Unknown")
+                except Exception:
+                    sectors[t] = "Unknown"
+            return sectors
+
+        pos_tickers = [p["Ticker"] for p in pos_data]
+        if pos_tickers:
+            sectors = get_sectors(tuple(pos_tickers))
+            sector_values = {}
+            for i, p in enumerate(pos_data):
+                s = sectors.get(p["Ticker"], "Unknown")
+                val = abs(float(positions[i].get("market_value", 0)))
+                sector_values[s] = sector_values.get(s, 0) + val
+
+            if sector_values:
+                sector_df = pd.DataFrame([
+                    {"Sector": s, "Value": v} for s, v in sector_values.items()
+                ])
+                fig_sector = px.pie(sector_df, values="Value", names="Sector",
+                                    title="Sector Exposure",
+                                    hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
+                fig_sector.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+                st.plotly_chart(fig_sector, use_container_width=True)
 else:
     st.info("No open positions")
 
 st.divider()
 
 # ──────────────────────────────────────────────
-# TRADE HISTORY
+# TRADE HISTORY (Tier 2 #8: Filtering + Export)
 # ──────────────────────────────────────────────
 
 st.subheader("Trade History")
 if all_trades:
-    df_trades = pd.DataFrame(all_trades)
+    df_trades_raw = pd.DataFrame(all_trades)
+
+    # Filters (Tier 2 #8)
+    fcol1, fcol2, fcol3 = st.columns(3)
+    with fcol1:
+        ticker_filter = st.multiselect(
+            "Filter by Ticker",
+            options=sorted(df_trades_raw["ticker"].unique()),
+            default=[],
+            key="trade_ticker_filter",
+        )
+    with fcol2:
+        status_filter = st.multiselect(
+            "Filter by Status",
+            options=["OPEN", "CLOSED"],
+            default=[],
+            key="trade_status_filter",
+        )
+    with fcol3:
+        pnl_filter = st.selectbox(
+            "Filter by P&L",
+            options=["All", "Winners Only", "Losers Only"],
+            key="trade_pnl_filter",
+        )
+
+    df_trades = df_trades_raw.copy()
+    if ticker_filter:
+        df_trades = df_trades[df_trades["ticker"].isin(ticker_filter)]
+    if status_filter:
+        df_trades = df_trades[df_trades["status"].isin(status_filter)]
+    if pnl_filter == "Winners Only":
+        df_trades = df_trades[(df_trades["pnl"].fillna(0)) > 0]
+    elif pnl_filter == "Losers Only":
+        df_trades = df_trades[(df_trades["pnl"].fillna(0)) < 0]
+
+    # Calculate hold duration (Tier 2 #7)
+    if "timestamp" in df_trades.columns and "exit_timestamp" in df_trades.columns:
+        def calc_hold_time(row):
+            try:
+                entry = pd.to_datetime(row["timestamp"])
+                exit_t = row.get("exit_timestamp")
+                if exit_t and pd.notna(exit_t):
+                    exit_dt = pd.to_datetime(exit_t)
+                    delta = exit_dt - entry
+                    hours = delta.total_seconds() / 3600
+                    if hours < 1:
+                        return f"{delta.total_seconds()/60:.0f}m"
+                    elif hours < 24:
+                        return f"{hours:.1f}h"
+                    else:
+                        return f"{delta.days}d"
+                return "Open"
+            except Exception:
+                return "—"
+        df_trades["hold_time"] = df_trades.apply(calc_hold_time, axis=1)
 
     # Calculate invested amount before formatting
     if "quantity" in df_trades.columns and "entry_price" in df_trades.columns:
@@ -510,36 +632,86 @@ if all_trades:
 
     display_cols = [
         "ticker", "action", "quantity", "entry_price", "invested", "stop_loss_price",
-        "take_profit_price", "exit_price", "conviction", "pnl", "status", "timestamp",
+        "take_profit_price", "exit_price", "conviction", "pnl", "hold_time", "status", "timestamp",
     ]
     available_cols = [c for c in display_cols if c in df_trades.columns]
     st.dataframe(df_trades[available_cols], use_container_width=True)
 
-    # Win/Loss stats
+    # CSV Export (Tier 2 #8)
+    csv_data = df_trades[available_cols].to_csv(index=False)
+    st.download_button("Export to CSV", csv_data, "trade_history.csv", "text/csv")
+
+    # Win/Loss stats + Hold time analysis (Tier 2 #7)
     if closed_trades:
-        scol1, scol2, scol3, scol4 = st.columns(4)
+        scol1, scol2, scol3, scol4, scol5, scol6 = st.columns(6)
         with scol1:
             st.metric("Avg Win", f"${avg_win:,.2f}" if avg_win > 0 else "N/A")
         with scol2:
             st.metric("Avg Loss", f"-${avg_loss:,.2f}" if avg_loss > 0 else "N/A")
         with scol3:
-            # Win/loss streak
-            streak = 0
-            streak_type = ""
-            for t in reversed(closed_trades):
-                p = t.get("pnl", 0) or 0
-                if not streak_type:
-                    streak_type = "W" if p > 0 else "L"
-                    streak = 1
-                elif (p > 0 and streak_type == "W") or (p < 0 and streak_type == "L"):
-                    streak += 1
-                else:
-                    break
-            streak_display = f"{streak} {'Wins' if streak_type == 'W' else 'Losses'}"
-            st.metric("Current Streak", streak_display)
-        with scol4:
             ratio = f"{avg_win / avg_loss:.2f}" if avg_loss > 0 else "N/A"
             st.metric("Win/Loss Ratio", ratio)
+        with scol4:
+            # Win/loss streak (Tier 2 #10)
+            streak = 0
+            streak_type = ""
+            longest_win = 0
+            longest_loss = 0
+            cur_streak = 0
+            cur_type = ""
+            for t in closed_trades:
+                p = t.get("pnl", 0) or 0
+                tp = "W" if p > 0 else "L"
+                if tp == cur_type:
+                    cur_streak += 1
+                else:
+                    cur_type = tp
+                    cur_streak = 1
+                if cur_type == "W" and cur_streak > longest_win:
+                    longest_win = cur_streak
+                elif cur_type == "L" and cur_streak > longest_loss:
+                    longest_loss = cur_streak
+            # Current streak
+            streak = cur_streak
+            streak_display = f"{streak} {'Wins' if cur_type == 'W' else 'Losses'}"
+            st.metric("Current Streak", streak_display)
+        with scol5:
+            st.metric("Best Streak", f"{longest_win} Wins")
+        with scol6:
+            st.metric("Worst Streak", f"{longest_loss} Losses")
+
+        # Avg hold time for winners vs losers (Tier 2 #7)
+        if "exit_timestamp" in df_trades_raw.columns:
+            def get_hold_hours(row):
+                try:
+                    entry = pd.to_datetime(row["timestamp"])
+                    exit_t = row.get("exit_timestamp")
+                    if exit_t and pd.notna(exit_t):
+                        return (pd.to_datetime(exit_t) - entry).total_seconds() / 3600
+                except Exception:
+                    pass
+                return None
+
+            df_closed = pd.DataFrame(closed_trades)
+            df_closed["hold_hours"] = df_closed.apply(get_hold_hours, axis=1)
+            winners_hold = df_closed[df_closed["pnl"] > 0]["hold_hours"].dropna()
+            losers_hold = df_closed[df_closed["pnl"] < 0]["hold_hours"].dropna()
+
+            hcol1, hcol2, hcol3 = st.columns(3)
+            with hcol1:
+                avg_w = winners_hold.mean() if len(winners_hold) > 0 else 0
+                st.metric("Avg Hold (Winners)", f"{avg_w:.1f}h" if avg_w > 0 else "N/A")
+            with hcol2:
+                avg_l = losers_hold.mean() if len(losers_hold) > 0 else 0
+                st.metric("Avg Hold (Losers)", f"{avg_l:.1f}h" if avg_l > 0 else "N/A")
+            with hcol3:
+                if avg_w > 0 and avg_l > 0:
+                    if avg_l < avg_w:
+                        st.metric("Diagnosis", "Cutting losses fast")
+                    else:
+                        st.metric("Diagnosis", "Holding losers too long")
+                else:
+                    st.metric("Diagnosis", "N/A")
 
     # Cumulative P&L chart
     closed_df_raw = pd.DataFrame(closed_trades)
