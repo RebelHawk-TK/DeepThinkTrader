@@ -110,30 +110,41 @@ portfolio_hist = get_portfolio_history()
 
 st.sidebar.header("Controls")
 
-# Auto-refresh with adjustable interval
+# Auto-refresh with adjustable interval (persisted via query params)
 auto_refresh = st.sidebar.toggle("Auto Refresh", value=True)
+
+# Read interval from URL query param so it survives page reloads
+_qp = st.query_params
+_saved_interval = int(_qp.get("ri", "30"))
+_interval_options = [10, 15, 30, 60, 120, 300]
+if _saved_interval not in _interval_options:
+    _saved_interval = 30
+
 refresh_interval = st.sidebar.select_slider(
     "Refresh interval",
-    options=[10, 15, 30, 60, 120, 300],
-    value=30,
+    options=_interval_options,
+    value=_saved_interval,
     format_func=lambda x: f"{x}s" if x < 60 else f"{x//60}m",
 )
+
+# Persist to query param when changed
+if refresh_interval != _saved_interval:
+    st.query_params["ri"] = str(refresh_interval)
 
 if st.sidebar.button("Refresh Now"):
     st.cache_data.clear()
     st.rerun()
 
 if auto_refresh:
-    import time as _time
-    _placeholder = st.sidebar.empty()
-    _placeholder.caption(f"Next refresh in {refresh_interval}s")
-    _time.sleep(0)  # non-blocking
     st.cache_data.clear()
-    # Use st.rerun with a fragment to auto-refresh after interval
     import streamlit.components.v1 as components
     components.html(
         f"""<script>
-            setTimeout(function(){{ window.parent.location.reload(); }}, {refresh_interval * 1000});
+            setTimeout(function(){{
+                var url = new URL(window.parent.location);
+                url.searchParams.set('ri', '{refresh_interval}');
+                window.parent.location.href = url.toString();
+            }}, {refresh_interval * 1000});
         </script>""",
         height=0,
     )
