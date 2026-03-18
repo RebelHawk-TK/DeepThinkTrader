@@ -171,6 +171,100 @@ class AlpacaMarketData:
             logger.error(f"Alpaca snapshot error for {ticker}: {e}")
             return None
 
+    def get_multi_snapshots(self, symbols: list[str]) -> dict[str, dict]:
+        """Fetch snapshots for many symbols in a single API call.
+
+        Returns dict mapping symbol -> snapshot data with normalized keys.
+        """
+        endpoint = "/v2/stocks/snapshots"
+        all_results: dict[str, dict] = {}
+
+        for i in range(0, len(symbols), 200):
+            chunk = symbols[i:i + 200]
+            try:
+                resp = self._session.get(
+                    f"{ALPACA_DATA_BASE_URL}{endpoint}",
+                    params={"symbols": ",".join(chunk), "feed": "iex"},
+                )
+                self._capture_request_id(resp, endpoint)
+                resp.raise_for_status()
+                raw = resp.json()
+
+                for sym, snap in raw.items():
+                    daily = snap.get("dailyBar") or {}
+                    prev = snap.get("prevDailyBar") or {}
+                    trade = snap.get("latestTrade") or {}
+                    minute = snap.get("minuteBar") or {}
+
+                    price = trade.get("p") or minute.get("c") or daily.get("c", 0)
+                    prev_close = prev.get("c", 0)
+
+                    all_results[sym] = {
+                        "price": price,
+                        "prev_close": prev_close,
+                        "daily_change_pct": round(
+                            ((price - prev_close) / prev_close) * 100, 2
+                        ) if prev_close > 0 else 0.0,
+                        "volume": daily.get("v", 0),
+                        "prev_volume": prev.get("v", 0),
+                        "vwap": daily.get("vw", 0),
+                    }
+
+            except Exception as e:
+                logger.error(f"Multi-snapshot error: {e}")
+
+        logger.info(f"Batch snapshots: {len(all_results)} symbols loaded")
+        return all_results
+
+    def get_multi_bars(
+        self,
+        symbols: list[str],
+        timeframe: str = "1Week",
+        days: int = 90,
+    ) -> dict[str, list[dict]]:
+        """Fetch historical bars for many symbols in a single paginated API call.
+
+        Returns dict mapping symbol -> list of bar dicts (oldest first).
+        """
+        endpoint = "/v2/stocks/bars"
+        start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%dT00:00:00Z")
+        all_bars: dict[str, list[dict]] = {}
+        page_token = None
+
+        while True:
+            params: dict = {
+                "symbols": ",".join(symbols),
+                "timeframe": timeframe,
+                "start": start,
+                "limit": 10000,
+                "adjustment": "raw",
+                "feed": "iex",
+            }
+            if page_token:
+                params["page_token"] = page_token
+
+            try:
+                resp = self._session.get(
+                    f"{ALPACA_DATA_BASE_URL}{endpoint}", params=params,
+                )
+                self._capture_request_id(resp, endpoint)
+                resp.raise_for_status()
+                data = resp.json()
+
+                bars_by_sym = data.get("bars", {})
+                for sym, bars in bars_by_sym.items():
+                    all_bars.setdefault(sym, []).extend(bars)
+
+                page_token = data.get("next_page_token")
+                if not page_token:
+                    break
+            except Exception as e:
+                logger.error(f"Multi-bars error: {e}")
+                break
+
+        logger.info(f"Batch bars ({timeframe}): {len(all_bars)} symbols loaded")
+        return all_bars
+
     def get_technicals(self, ticker: str) -> dict:
         """Compute technical indicators from Alpaca historical bars.
         Drop-in replacement for yfinance-based technicals."""

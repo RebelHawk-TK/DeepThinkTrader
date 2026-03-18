@@ -278,11 +278,30 @@ class ResearchAgent:
                 # Amplify existing signal when trend is strong
                 adv_score *= 1.3
 
+        # Dynamically reweight when data sources are unavailable
+        has_news = len(news) > 0
+        has_reddit = self.reddit is not None and reddit["post_count"] > 0
+        has_adv = bool(advanced_technicals)
+
+        if has_news and has_reddit:
+            w_news, w_reddit, w_tech, w_adv = 0.3, 0.2, 0.2, 0.3
+        elif has_news:
+            w_news, w_reddit, w_tech, w_adv = 0.35, 0.0, 0.3, 0.35
+        elif has_reddit:
+            w_news, w_reddit, w_tech, w_adv = 0.0, 0.25, 0.35, 0.4
+        else:
+            # Only technicals available — give them full weight
+            w_news, w_reddit, w_tech, w_adv = 0.0, 0.0, 0.45, 0.55
+
+        if not has_adv:
+            w_tech += w_adv
+            w_adv = 0.0
+
         combined = round(
-            (news_impact / 10 * 0.3)
-            + (reddit_score * 0.2)
-            + (tech_score * 0.2)
-            + (adv_score * 0.3),
+            (news_impact / 10 * w_news)
+            + (reddit_score * w_reddit)
+            + (tech_score * w_tech)
+            + (adv_score * w_adv),
             3,
         )
 

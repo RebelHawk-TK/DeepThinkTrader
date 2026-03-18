@@ -20,6 +20,8 @@ from utils.database import Database
 st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="wide")
 st.title("DeepThinkTrader Dashboard")
 
+YAHOO_URL = "https://finance.yahoo.com/quote"
+
 db = Database()
 config = Config()
 
@@ -135,6 +137,60 @@ if auto_refresh:
         </script>""",
         height=0,
     )
+
+st.sidebar.markdown("---")
+
+# === TRADE MODE SWITCHER ===
+st.sidebar.subheader("Trade Mode")
+
+_mode_labels = {"safe": "🛡️ Safe", "normal": "⚖️ Normal", "aggressive": "🔥 Aggressive"}
+_current_mode = config.TRADE_MODE
+_mode_index = list(_mode_labels.keys()).index(_current_mode) if _current_mode in _mode_labels else 1
+
+_selected_mode = st.sidebar.radio(
+    "Select mode",
+    options=list(_mode_labels.keys()),
+    format_func=lambda m: _mode_labels[m],
+    index=_mode_index,
+    horizontal=True,
+    label_visibility="collapsed",
+)
+
+if _selected_mode != _current_mode:
+    if st.sidebar.button(f"Switch to {_mode_labels[_selected_mode]}", type="primary"):
+        import subprocess, re as _re
+
+        _env_path = os.path.join(os.path.dirname(__file__), ".env")
+        _env_content = open(_env_path).read()
+        _env_content = _re.sub(
+            r"^TRADE_MODE=.*$",
+            f"TRADE_MODE={_selected_mode}",
+            _env_content,
+            flags=_re.MULTILINE,
+        )
+        with open(_env_path, "w") as f:
+            f.write(_env_content)
+
+        # Restart bot
+        _project_dir = os.path.dirname(__file__)
+        subprocess.Popen(
+            ["bash", "-c", f"cd {_project_dir} && bash stop.sh && bash run.sh"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        st.sidebar.success(f"Switching to {_mode_labels[_selected_mode]}... restarting bot")
+        import time as _t
+        _t.sleep(3)
+        st.cache_data.clear()
+        st.rerun()
+else:
+    _mode_desc = {
+        "safe": "Low risk, high conviction only",
+        "normal": "Balanced risk/reward",
+        "aggressive": "Higher risk, more trades",
+    }
+    st.sidebar.caption(_mode_desc.get(_current_mode, ""))
 
 st.sidebar.markdown("---")
 
@@ -280,7 +336,7 @@ with rcol1:
 with rcol2:
     st.metric("Max Drawdown", f"-{max_drawdown_pct:.1f}%",
               delta=f"-${max_drawdown_dollars:,.0f}" if max_drawdown_dollars > 0 else "$0",
-              delta_color="inverse" if max_drawdown_dollars > 0 else "off")
+              delta_color="normal" if max_drawdown_dollars > 0 else "off")
 with rcol3:
     color = "normal" if sharpe_ratio > 0 else "inverse"
     st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
@@ -493,16 +549,41 @@ if positions:
         total_market_value += market_val
         pos_data.append({
             "Ticker": p["symbol"],
+            "Details": f"{YAHOO_URL}/{p['symbol']}",
             "Qty": int(p["qty"]),
-            "Avg Entry": f"${float(p['avg_entry_price']):,.2f}",
-            "Current": f"${float(p['current_price']):,.2f}",
-            "Market Value": f"${market_val:,.2f}",
-            "P&L": f"${unrealized:+,.2f}",
-            "P&L %": f"{unrealized_pct:+.2f}%",
+            "Avg Entry": float(p["avg_entry_price"]),
+            "Current": float(p["current_price"]),
+            "Market Value": market_val,
+            "P&L": unrealized,
+            "P&L %": unrealized_pct,
         })
 
     df_pos = pd.DataFrame(pos_data)
-    st.dataframe(df_pos, use_container_width=True, hide_index=True)
+
+    def _color_pnl(val):
+        if isinstance(val, (int, float)):
+            color = "#4CAF50" if val >= 0 else "#F44336"
+            return f"color: {color}; font-weight: bold"
+        return ""
+
+    styled_pos = df_pos.style.map(
+        _color_pnl, subset=["P&L", "P&L %"]
+    ).format({
+        "Avg Entry": "${:,.2f}",
+        "Current": "${:,.2f}",
+        "Market Value": "${:,.2f}",
+        "P&L": "${:+,.2f}",
+        "P&L %": "{:+.2f}%",
+    })
+
+    st.dataframe(
+        styled_pos,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Details": st.column_config.LinkColumn("Yahoo Finance", display_text="View"),
+        },
+    )
 
     # Position summary + allocation pie chart
     pcol1, pcol2 = st.columns([1, 1])
@@ -655,12 +736,20 @@ if all_trades:
     if "pnl" in df_trades.columns:
         df_trades["pnl"] = df_trades["pnl"].apply(lambda x: f"${x:+,.2f}" if x else "—")
 
+    df_trades["details"] = df_trades["ticker"].apply(lambda t: f"{YAHOO_URL}/{t}")
+
     display_cols = [
-        "ticker", "action", "quantity", "entry_price", "invested", "stop_loss_price",
+        "ticker", "details", "action", "quantity", "entry_price", "invested", "stop_loss_price",
         "take_profit_price", "exit_price", "conviction", "pnl", "hold_time", "status", "timestamp",
     ]
     available_cols = [c for c in display_cols if c in df_trades.columns]
-    st.dataframe(df_trades[available_cols], use_container_width=True)
+    st.dataframe(
+        df_trades[available_cols],
+        use_container_width=True,
+        column_config={
+            "details": st.column_config.LinkColumn("Yahoo Finance", display_text="View"),
+        },
+    )
 
     # CSV Export (Tier 2 #8)
     csv_data = df_trades[available_cols].to_csv(index=False)
@@ -784,10 +873,18 @@ if analyses:
     df_analysis["patt"] = extra_cols["pattern_score"]
     df_analysis["earn_risk"] = extra_cols["earnings_risk"]
 
-    display_cols = ["ticker", "price", "action", "conviction", "tech", "fund", "cata", "patt",
+    df_analysis["details"] = df_analysis["ticker"].apply(lambda t: f"{YAHOO_URL}/{t}")
+
+    display_cols = ["ticker", "details", "price", "action", "conviction", "tech", "fund", "cata", "patt",
                     "earn_risk", "stop_loss_pct", "take_profit_pct", "timestamp"]
     available_cols = [c for c in display_cols if c in df_analysis.columns]
-    st.dataframe(df_analysis[available_cols], use_container_width=True)
+    st.dataframe(
+        df_analysis[available_cols],
+        use_container_width=True,
+        column_config={
+            "details": st.column_config.LinkColumn("Yahoo Finance", display_text="View"),
+        },
+    )
 
     # Analysis-to-trade conversion rate
     total_analyses = len(analyses)
@@ -821,19 +918,25 @@ st.divider()
 # ──────────────────────────────────────────────
 
 with st.expander("Bot Configuration"):
+    mode = config.TRADE_MODE.upper()
+    mode_emoji = {"SAFE": "🛡️", "NORMAL": "⚖️", "AGGRESSIVE": "🔥"}.get(mode, "⚙️")
+    st.markdown(f"### {mode_emoji} Trade Mode: **{mode}**")
+    st.markdown("*Change in `.env` → `TRADE_MODE=safe|normal|aggressive` → restart bot*")
+    st.markdown("")
+
     cfgcol1, cfgcol2, cfgcol3, cfgcol4 = st.columns(4)
     with cfgcol1:
-        st.markdown(f"**Watchlist:** {', '.join(config.WATCHLIST)}")
-        st.markdown(f"**Research Interval:** {config.RESEARCH_INTERVAL_MINUTES} min")
-    with cfgcol2:
         st.markdown(f"**Max Risk/Trade:** {config.MAX_RISK_PER_TRADE*100}%")
         st.markdown(f"**Max Daily Loss:** {config.MAX_DAILY_LOSS*100}%")
-    with cfgcol3:
+    with cfgcol2:
         st.markdown(f"**Min Conviction:** {config.MIN_CONVICTION}/10")
         st.markdown(f"**Min R:R Ratio:** {config.MIN_REWARD_RISK_RATIO}:1")
+    with cfgcol3:
+        st.markdown(f"**Max Position Size:** {config.MAX_POSITION_PCT*100:.0f}% of account")
+        st.markdown(f"**Max Open Positions:** {config.MAX_OPEN_POSITIONS}")
     with cfgcol4:
-        st.markdown(f"**Account Size:** ${config.ACCOUNT_SIZE:,.0f}")
-        st.markdown(f"**AI Model:** Claude Haiku 4.5")
+        st.markdown(f"**Scanner Depth:** Top {config.SCANNER_TOP_N} candidates")
+        st.markdown(f"**Cycle Interval:** {config.RESEARCH_INTERVAL_MINUTES} min")
 
 # API Request IDs
 with st.expander("Alpaca API Request IDs (debugging)"):

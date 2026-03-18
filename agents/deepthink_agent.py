@@ -280,13 +280,15 @@ class DeepThinkAgent:
             base_stop = 5.0
 
         if conviction >= 9:
-            stop_loss_pct = base_stop * 0.8
+            stop_loss_pct = round(base_stop * 0.8, 1)
         elif conviction >= 7:
             stop_loss_pct = base_stop
         else:
-            stop_loss_pct = base_stop * 1.2
+            stop_loss_pct = round(base_stop * 1.2, 1)
 
-        take_profit_pct = round(stop_loss_pct * self.config.MIN_REWARD_RISK_RATIO, 1)
+        # Use math.ceil to ensure take_profit always meets the R:R ratio after rounding
+        import math
+        take_profit_pct = math.ceil(stop_loss_pct * self.config.MIN_REWARD_RISK_RATIO * 10) / 10
         position_size_pct = round(
             (self.config.MAX_RISK_PER_TRADE * 100) / (stop_loss_pct / 100), 2
         )
