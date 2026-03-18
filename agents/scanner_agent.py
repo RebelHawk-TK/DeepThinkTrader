@@ -1,11 +1,12 @@
-"""Scanner Agent — Discovers trending, high-volume, and top-moving stocks daily.
+"""Scanner Agent — Smart 3-stage funnel for discovering high-quality trade candidates.
 
-Sources:
-- Alpaca most active / top movers API
-- Yahoo Finance trending tickers
-- NewsAPI top mentioned tickers
+Stage 1: Discovery — Alpaca screener (most active, movers) + news trending + popular stocks
+Stage 2: Batch Pre-Screen — Multi-symbol snapshots + weekly bars for relative strength,
+         weekly trend, volume confirmation. Scores and ranks candidates.
+Stage 3: Output top N candidates for deep analysis by ResearchAgent + DeepThinkAgent.
 
-Feeds discovered tickers into the main trading pipeline.
+This replaces the old approach of sending 100+ tickers through expensive per-ticker
+analysis (~60s each via Twelve Data). Now only ~20 high-quality candidates reach deep analysis.
 """
 
 from __future__ import annotations
@@ -16,49 +17,70 @@ from collections import Counter
 from datetime import datetime, timedelta
 
 import requests as http_requests
-import yfinance as yf
 from newsapi import NewsApiClient
 
 from config import Config
+from utils.alpaca_data import AlpacaMarketData
 from utils.database import Database
 
 logger = logging.getLogger(__name__)
 
-# Well-known large-cap tickers to filter against (avoid penny stocks)
 VALID_EXCHANGES = {"NYSE", "NASDAQ", "ARCA", "BATS", "AMEX", "IEX"}
 
-# Skip inverse ETFs, leveraged products, and volatility instruments
 SKIP_TICKERS = {
     # Leveraged bull/bear
     "SQQQ", "TQQQ", "UVXY", "SPXS", "SPXL", "SOXL", "SOXS",
     "LABU", "LABD", "NUGT", "DUST", "JNUG", "JDST", "TVIX",
-    # Inverse ETFs (go up when market goes down — confuses bullish signals)
+    # Inverse ETFs
     "SPDN", "SH", "PSQ", "DOG", "RWM", "SDS", "QID", "SDOW",
     "SRTY", "SARK", "HIBS", "BERZ",
-    # 3x leveraged (too volatile for bot)
+    # 3x leveraged
     "TZA", "TNA", "UPRO", "SPXU", "TECL", "TECS", "FAS", "FAZ",
     "ERX", "ERY", "CURE", "DRIP", "GUSH", "NAIL", "DRV",
     # Volatility products
     "UVIX", "SVIX", "VXX", "VIXY", "SVXY",
     # Leveraged single-stock ETFs
-    "TSLL", "TSLG", "NVDL", "NVDS", "AMDL",
+    "TSLL", "TSLG", "NVDL", "NVDS", "AMDL", "TSDD",
 }
 
-# Minimum price and volume thresholds
 MIN_PRICE = 5.0
 MAX_PRICE = 5000.0
 MIN_AVG_VOLUME = 200_000
+
+# Popular large/mid-cap stocks for broad coverage
+POPULAR_STOCKS = [
+    "AAPL", "MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
+    "JPM", "V", "UNH", "JNJ", "WMT", "PG", "MA", "HD",
+    "XOM", "CVX", "LLY", "ABBV", "MRK", "PFE", "KO", "PEP", "COST",
+    "AVGO", "TMO", "MCD", "CSCO", "ACN", "ABT", "DHR", "TXN", "NEE",
+    "AMD", "NFLX", "ADBE", "CRM", "INTC", "QCOM", "AMAT", "INTU",
+    "AMGN", "ISRG", "BKNG", "MDLZ", "GILD", "ADI", "REGN", "VRTX",
+    "BA", "CAT", "GE", "MMM", "HON", "UPS", "RTX", "LMT", "DE",
+    "SBUX", "NKE", "LOW", "TGT", "F", "GM", "RIVN", "LCID",
+    "PYPL", "SQ", "SHOP", "COIN", "ROKU", "SNAP", "PINS", "UBER",
+    "ABNB", "DKNG", "PLTR", "SOFI", "HOOD", "MARA", "RIOT", "CLSK",
+    "DIS", "CMCSA", "T", "VZ", "TMUS",
+    "GS", "MS", "C", "BAC", "WFC", "SCHW",
+]
+
+# Sector representatives — top liquid stocks per sector for dynamic watchlist
+SECTOR_POOL = {
+    "Technology": ["AAPL", "MSFT", "NVDA", "AVGO", "AMD", "CRM", "ADBE", "INTC", "QCOM", "NFLX"],
+    "Healthcare": ["UNH", "LLY", "ABBV", "MRK", "PFE", "AMGN", "ISRG", "REGN", "VRTX", "GILD"],
+    "Financials": ["JPM", "V", "MA", "GS", "MS", "BAC", "WFC", "SCHW", "C", "PYPL"],
+    "Energy": ["XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "VLO", "OXY", "USO"],
+    "Consumer": ["AMZN", "TSLA", "HD", "MCD", "SBUX", "NKE", "COST", "WMT", "TGT", "LOW"],
+    "Industrials": ["CAT", "GE", "HON", "BA", "RTX", "LMT", "DE", "UPS", "UNP", "MMM"],
+    "Communication": ["META", "GOOG", "DIS", "CMCSA", "T", "VZ", "TMUS", "SNAP", "PINS", "ROKU"],
+}
 
 
 class ScannerAgent:
     def __init__(self, db: Database | None = None):
         self.config = Config()
         self.db = db or Database()
-        self._session = http_requests.Session()
-        self._session.headers.update({
-            "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-            "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
-        })
+        self.alpaca_data = AlpacaMarketData(self.db)
+        self._session = self.alpaca_data._session
         self._data_url = "https://data.alpaca.markets"
         self._trading_url = self.config.ALPACA_BASE_URL
 
@@ -74,8 +96,9 @@ class ScannerAgent:
             )
         return request_id
 
-    def scan_most_active(self, top_n: int = 50) -> list[dict]:
-        """Get most active stocks by volume from Alpaca screener."""
+    # ── Stage 1: Discovery ──────────────────────────────────────────
+
+    def _discover_most_active(self, top_n: int = 50) -> list[dict]:
         endpoint = "/v1beta1/screener/stocks/most-actives"
         try:
             resp = self._session.get(
@@ -84,58 +107,38 @@ class ScannerAgent:
             )
             self._capture_request_id(resp, endpoint)
             resp.raise_for_status()
-            data = resp.json()
-
             results = []
-            for item in data.get("most_actives", []):
+            for item in resp.json().get("most_actives", []):
                 ticker = item.get("symbol", "")
-                if ticker in SKIP_TICKERS:
-                    continue
-                results.append({
-                    "ticker": ticker,
-                    "volume": item.get("volume", 0),
-                    "trade_count": item.get("trade_count", 0),
-                    "source": "alpaca_most_active",
-                })
-            logger.info(f"Scanner: {len(results)} most active stocks found")
+                if ticker and ticker not in SKIP_TICKERS:
+                    results.append({"ticker": ticker, "source": "most_active"})
+            logger.info(f"Scanner: {len(results)} most active stocks")
             return results
         except Exception as e:
             logger.error(f"Scanner most-active error: {e}")
             return []
 
-    def scan_top_movers(self, top_n: int = 50) -> list[dict]:
-        """Get top gainers and losers from Alpaca screener."""
+    def _discover_top_movers(self, top_n: int = 50) -> list[dict]:
         results = []
-        for direction in ["gainers", "losers"]:
-            endpoint = f"/v1beta1/screener/stocks/movers"
-            try:
-                resp = self._session.get(
-                    f"{self._data_url}{endpoint}",
-                    params={"top": top_n},
-                )
-                self._capture_request_id(resp, endpoint)
-                resp.raise_for_status()
-                data = resp.json()
-
+        endpoint = "/v1beta1/screener/stocks/movers"
+        try:
+            resp = self._session.get(
+                f"{self._data_url}{endpoint}", params={"top": top_n},
+            )
+            self._capture_request_id(resp, endpoint)
+            resp.raise_for_status()
+            data = resp.json()
+            for direction in ("gainers", "losers"):
                 for item in data.get(direction, []):
                     ticker = item.get("symbol", "")
-                    if ticker in SKIP_TICKERS:
-                        continue
-                    change = item.get("percent_change", 0)
-                    results.append({
-                        "ticker": ticker,
-                        "change_pct": change,
-                        "price": item.get("price", 0),
-                        "source": f"alpaca_{direction}",
-                    })
-            except Exception as e:
-                logger.error(f"Scanner {direction} error: {e}")
-
-        logger.info(f"Scanner: {len(results)} top movers found")
+                    if ticker and ticker not in SKIP_TICKERS:
+                        results.append({"ticker": ticker, "source": f"movers_{direction}"})
+        except Exception as e:
+            logger.error(f"Scanner movers error: {e}")
+        logger.info(f"Scanner: {len(results)} top movers")
         return results
 
-    def scan_news_trending(self, top_n: int = 20) -> list[dict]:
-        """Find most-mentioned tickers in today's financial news."""
+    def _discover_news_trending(self, top_n: int = 20) -> list[dict]:
         try:
             newsapi = NewsApiClient(api_key=self.config.NEWSAPI_KEY)
             from_date = (datetime.now() - timedelta(hours=12)).strftime("%Y-%m-%d")
@@ -146,8 +149,6 @@ class ScannerAgent:
                 sort_by="popularity",
                 page_size=100,
             )
-
-            # Extract ticker-like symbols from headlines
             ticker_pattern = re.compile(r'\b([A-Z]{2,5})\b')
             common_words = {
                 "THE", "AND", "FOR", "ARE", "BUT", "NOT", "YOU", "ALL",
@@ -155,41 +156,195 @@ class ScannerAgent:
                 "NOW", "OLD", "SEE", "WAY", "WHO", "DID", "GET", "HIS",
                 "HOW", "ITS", "MAY", "SAY", "SHE", "TWO", "USE", "CEO",
                 "IPO", "FDA", "SEC", "GDP", "CPI", "ETF", "USA", "NYSE",
-                "CEO", "CFO", "COO", "CTO", "WITH", "THIS", "THAT",
+                "CFO", "COO", "CTO", "WITH", "THIS", "THAT",
                 "FROM", "HAVE", "BEEN", "WILL", "MORE", "WHEN", "WHAT",
                 "ALSO", "JUST", "OVER", "THAN", "THEM", "SOME", "INTO",
                 "YEAR", "MOST", "MUCH", "VERY", "AFTER", "DOWN",
                 "ONLY", "BACK", "SAYS", "SAID", "READ", "US", "AI",
             }
-
             mentions = Counter()
             for article in response.get("articles", []):
                 title = article.get("title", "") or ""
-                found = ticker_pattern.findall(title)
-                for t in found:
-                    if t not in common_words and len(t) >= 2:
+                for t in ticker_pattern.findall(title):
+                    if t not in common_words:
                         mentions[t] += 1
-
-            results = []
-            for ticker, count in mentions.most_common(top_n):
-                if count >= 1:  # At least 1 mention
-                    results.append({
-                        "ticker": ticker,
-                        "mention_count": count,
-                        "source": "news_trending",
-                    })
-
-            logger.info(f"Scanner: {len(results)} news-trending tickers found")
+            results = [
+                {"ticker": t, "source": "news_trending"}
+                for t, count in mentions.most_common(top_n) if count >= 2
+            ]
+            logger.info(f"Scanner: {len(results)} news-trending tickers")
             return results
         except Exception as e:
             logger.error(f"Scanner news error: {e}")
             return []
 
+    # ── Stage 2: Batch Pre-Screen ───────────────────────────────────
+
+    def _batch_prescreen(
+        self,
+        tickers: list[str],
+        source_counts: dict[str, int],
+    ) -> list[dict]:
+        """Score and rank candidates using batch Alpaca data.
+
+        Returns list of dicts sorted by composite score (highest first).
+        """
+        # Always include SPY as benchmark
+        all_symbols = list(set(tickers + ["SPY"]))
+
+        # Batch fetch: snapshots (1 API call) + weekly bars (1-2 API calls)
+        snapshots = self.alpaca_data.get_multi_snapshots(all_symbols)
+        weekly_bars = self.alpaca_data.get_multi_bars(all_symbols, "1Week", days=90)
+
+        spy_snap = snapshots.get("SPY", {})
+        spy_weekly = weekly_bars.get("SPY", [])
+        spy_4w_return = self._calc_return(spy_weekly, weeks=4)
+
+        scored = []
+        for ticker in tickers:
+            snap = snapshots.get(ticker)
+            if not snap:
+                continue
+
+            price = snap.get("price", 0)
+            volume = snap.get("volume", 0)
+            daily_change = snap.get("daily_change_pct", 0)
+
+            # Basic filters
+            if price < MIN_PRICE or price > MAX_PRICE:
+                continue
+            if volume < MIN_AVG_VOLUME:
+                continue
+
+            # Relative strength vs SPY (4-week return comparison)
+            ticker_weekly = weekly_bars.get(ticker, [])
+            ticker_4w_return = self._calc_return(ticker_weekly, weeks=4)
+            rel_strength = ticker_4w_return - spy_4w_return
+
+            if rel_strength < self.config.SCANNER_MIN_REL_STRENGTH:
+                continue
+
+            # Weekly trend: last close above 10-week SMA
+            weekly_uptrend = self._check_weekly_trend(ticker_weekly, sma_period=10)
+
+            # Volume confirmation: today's volume vs previous day
+            prev_volume = snap.get("prev_volume", 0)
+            vol_ratio = volume / prev_volume if prev_volume > 0 else 1.0
+
+            # Composite score (0-100)
+            score = 0.0
+
+            # Relative strength: 0-30 pts (0 at -5%, 30 at +10%)
+            score += max(0, min(30, (rel_strength + 5) * 2))
+
+            # Weekly uptrend: 0 or 20 pts
+            if weekly_uptrend:
+                score += 20
+
+            # Volume ratio: 0-20 pts (1.0x = 10, 2.0x = 20, capped)
+            score += max(0, min(20, vol_ratio * 10))
+
+            # Multi-source discovery bonus: 0-15 pts
+            sources = source_counts.get(ticker, 1)
+            score += min(15, sources * 5)
+
+            # Daily momentum: 0-15 pts
+            if daily_change > 0:
+                score += min(15, daily_change * 3)
+
+            scored.append({
+                "ticker": ticker,
+                "score": round(score, 1),
+                "rel_strength": round(rel_strength, 2),
+                "weekly_uptrend": weekly_uptrend,
+                "vol_ratio": round(vol_ratio, 2),
+                "daily_change": daily_change,
+                "price": price,
+                "sources": sources,
+            })
+
+        # Sort by composite score
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        if scored:
+            top5 = ", ".join(f"{s['ticker']}({s['score']})" for s in scored[:5])
+            logger.info(f"Pre-screen: {len(scored)} passed filters | Top 5: {top5}")
+
+        return scored
+
+    def _calc_return(self, bars: list[dict], weeks: int = 4) -> float:
+        """Calculate percentage return over the last N weeks from weekly bars."""
+        if len(bars) < weeks + 1:
+            return 0.0
+        recent_close = bars[-1].get("c", 0)
+        past_close = bars[-(weeks + 1)].get("c", 0)
+        if past_close <= 0:
+            return 0.0
+        return round(((recent_close - past_close) / past_close) * 100, 2)
+
+    def _check_weekly_trend(self, bars: list[dict], sma_period: int = 10) -> bool:
+        """Check if latest weekly close is above N-week SMA (uptrend)."""
+        if len(bars) < sma_period:
+            return False
+        closes = [b.get("c", 0) for b in bars[-sma_period:]]
+        sma = sum(closes) / len(closes)
+        return closes[-1] > sma
+
+    # ── Dynamic Sector Watchlist ───────────────────────────────────
+
+    def build_sector_watchlist(self) -> list[str]:
+        """Pick the strongest ticker from each sector using batch snapshots.
+
+        Returns one ticker per sector (7 total) — the best daily performer
+        in each sector that is in a weekly uptrend.
+        """
+        # Flatten all sector pool tickers
+        all_tickers = []
+        for tickers in SECTOR_POOL.values():
+            all_tickers.extend(tickers)
+        all_tickers = list(set(all_tickers))
+
+        # Batch fetch snapshots + weekly bars (2 API calls)
+        snapshots = self.alpaca_data.get_multi_snapshots(all_tickers + ["SPY"])
+        weekly_bars = self.alpaca_data.get_multi_bars(all_tickers + ["SPY"], "1Week", days=90)
+
+        spy_4w = self._calc_return(weekly_bars.get("SPY", []), weeks=4)
+
+        watchlist = []
+        for sector, pool in SECTOR_POOL.items():
+            best_ticker = None
+            best_score = -999
+
+            for ticker in pool:
+                snap = snapshots.get(ticker)
+                if not snap or snap.get("price", 0) <= 0:
+                    continue
+
+                wb = weekly_bars.get(ticker, [])
+                uptrend = self._check_weekly_trend(wb, sma_period=10)
+                rel_strength = self._calc_return(wb, weeks=4) - spy_4w
+                daily_change = snap.get("daily_change_pct", 0)
+
+                # Score: relative strength + daily momentum + uptrend bonus
+                score = rel_strength + daily_change + (10 if uptrend else 0)
+
+                if score > best_score:
+                    best_score = score
+                    best_ticker = ticker
+
+            if best_ticker:
+                watchlist.append(best_ticker)
+                logger.info(f"Sector watchlist [{sector}]: {best_ticker} (score={best_score:.1f})")
+
+        logger.info(f"Dynamic watchlist: {', '.join(watchlist)} ({len(watchlist)} sectors)")
+        return watchlist
+
+    # ── Stage 3: Orchestration ──────────────────────────────────────
+
     def _load_tradeable_assets(self) -> set[str]:
-        """Load all tradeable assets from Alpaca in one API call."""
+        """Load all tradeable US equity symbols from Alpaca."""
         if hasattr(self, "_tradeable_cache"):
             return self._tradeable_cache
-
         try:
             resp = self._session.get(
                 f"{self._trading_url}/v2/assets",
@@ -201,136 +356,125 @@ class ScannerAgent:
             self._tradeable_cache = {
                 a["symbol"] for a in assets
                 if a.get("tradable") and a.get("exchange") in VALID_EXCHANGES
+                and "." not in a["symbol"]
+                and a["symbol"] not in SKIP_TICKERS
             }
-            logger.info(f"Scanner: loaded {len(self._tradeable_cache)} tradeable assets from Alpaca")
+            logger.info(f"Scanner: {len(self._tradeable_cache)} tradeable assets loaded")
             return self._tradeable_cache
         except Exception as e:
             logger.error(f"Failed to load tradeable assets: {e}")
             self._tradeable_cache = set()
             return self._tradeable_cache
 
-    def validate_ticker(self, ticker: str) -> bool:
-        """Check if a ticker is tradeable using cached asset list."""
-        tradeable = self._load_tradeable_assets()
-        return ticker in tradeable
-
-    def filter_candidates(self, candidates: list[dict]) -> list[str]:
-        """Deduplicate, validate, and filter candidates by price/volume."""
-        # Deduplicate and score by number of sources
-        ticker_scores = Counter()
-        for c in candidates:
-            ticker_scores[c["ticker"]] += 1
-
-        # Sort by number of sources mentioning them (multi-source = stronger signal)
-        ranked = [t for t, _ in ticker_scores.most_common(150)]
-
-        # Remove tickers already in base watchlist (they'll be added separately)
-        existing = set(self.config.WATCHLIST)
-        ranked = [t for t in ranked if t not in existing and "." not in t]
-
-        # Known-good tickers that don't need validation
-        known_good = {c["ticker"] for c in candidates if c.get("source") == "popular_stocks"}
-
-        # Validate and filter
-        valid = []
-        for ticker in ranked:
-            if ticker in SKIP_TICKERS:
-                continue
-
-            # Skip snapshot check for known popular stocks — just validate tradeable
-            if ticker in known_good:
-                if self.validate_ticker(ticker):
-                    valid.append(ticker)
-                if len(valid) >= 95:
-                    break
-                continue
-
-            if not self.validate_ticker(ticker):
-                continue
-
-            # Quick price/volume check via Alpaca snapshot (scanner-discovered only)
-            try:
-                resp = self._session.get(
-                    f"{self._data_url}/v2/stocks/{ticker}/snapshot",
-                    params={"feed": "iex"},
-                )
-                self._capture_request_id(resp, f"/v2/stocks/{ticker}/snapshot")
-                if not resp.ok:
-                    continue
-                snap = resp.json()
-                bar = snap.get("dailyBar") or snap.get("latestBar", {})
-                price = bar.get("c", 0)
-                volume = bar.get("v", 0)
-
-                if price < MIN_PRICE or price > MAX_PRICE:
-                    continue
-                if volume < MIN_AVG_VOLUME:
-                    continue
-
-                valid.append(ticker)
-                if len(valid) >= 95:  # Cap at 95 discovered + 5 watchlist = 100
-                    break
-            except Exception:
-                continue
-
-        logger.info(f"Scanner: {len(valid)} validated tickers: {valid}")
-        return valid
-
-    def scan_sp500_and_popular(self) -> list[dict]:
-        """Add well-known large/mid-cap stocks to ensure broad coverage."""
-        # Top 100 most-traded US stocks by typical daily volume
-        popular = [
-            "AAPL", "MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "TSLA",
-            "BRK.B", "JPM", "V", "UNH", "JNJ", "WMT", "PG", "MA", "HD",
-            "XOM", "CVX", "LLY", "ABBV", "MRK", "PFE", "KO", "PEP", "COST",
-            "AVGO", "TMO", "MCD", "CSCO", "ACN", "ABT", "DHR", "TXN", "NEE",
-            "AMD", "NFLX", "ADBE", "CRM", "INTC", "QCOM", "AMAT", "INTU",
-            "AMGN", "ISRG", "BKNG", "MDLZ", "GILD", "ADI", "REGN", "VRTX",
-            "BA", "CAT", "GE", "MMM", "HON", "UPS", "RTX", "LMT", "DE",
-            "SBUX", "NKE", "LOW", "TGT", "F", "GM", "RIVN", "LCID",
-            "PYPL", "SQ", "SHOP", "COIN", "ROKU", "SNAP", "PINS", "UBER",
-            "ABNB", "DKNG", "PLTR", "SOFI", "HOOD", "MARA", "RIOT", "CLSK",
-            "DIS", "CMCSA", "T", "VZ", "TMUS",
-            "GS", "MS", "C", "BAC", "WFC", "SCHW",
-            "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK",
-        ]
-        results = []
-        for ticker in popular:
-            results.append({
-                "ticker": ticker,
-                "source": "popular_stocks",
-            })
-        logger.info(f"Scanner: {len(results)} popular/large-cap stocks added")
-        return results
-
     def scan(self) -> list[str]:
-        """Run full scan: gather candidates from all sources, filter, return up to 95 tickers."""
-        logger.info("Scanner: Starting market scan for up to 100 stocks...")
+        """Full-universe scan: snapshot ALL tradeable stocks → batch pre-screen → top N.
 
-        # Phase 1: scanner-discovered (trending, movers, news)
-        scanner_candidates = []
-        scanner_candidates.extend(self.scan_most_active())
-        scanner_candidates.extend(self.scan_top_movers())
-        scanner_candidates.extend(self.scan_news_trending())
+        Stage 1: Load entire Alpaca universe (~12K symbols)
+        Stage 2: Batch snapshot all of them (filters by price/volume to ~5K)
+        Stage 3: Score with relative strength, weekly trend, volume → top N
+        """
+        logger.info("Scanner: Starting full-universe scan...")
 
-        discovered = self.filter_candidates(scanner_candidates) if scanner_candidates else []
-        logger.info(f"Scanner phase 1: {len(discovered)} trending/active stocks")
-
-        # Phase 2: fill remaining slots with popular large-cap stocks
-        existing = set(self.config.WATCHLIST) | set(discovered)
+        # Stage 1: Get all tradeable symbols + discovery source bonuses
         tradeable = self._load_tradeable_assets()
-        popular = self.scan_sp500_and_popular()
+        all_symbols = list(tradeable)
 
-        for p in popular:
-            if len(discovered) >= 95:
-                break
-            ticker = p["ticker"]
-            if ticker not in existing and ticker in tradeable:
-                discovered.append(ticker)
-                existing.add(ticker)
+        # Also run discovery scanners for source-count bonuses
+        discovery_candidates = []
+        discovery_candidates.extend(self._discover_most_active())
+        discovery_candidates.extend(self._discover_top_movers())
+        discovery_candidates.extend(self._discover_news_trending())
+
+        source_counts: dict[str, int] = Counter()
+        for c in discovery_candidates:
+            source_counts[c["ticker"]] += 1
+        # Popular stocks get a bonus too
+        for t in POPULAR_STOCKS:
+            source_counts[t] += 1
 
         logger.info(
-            f"Scanner complete: {len(discovered)} total stocks "
-            f"(+ {len(self.config.WATCHLIST)} watchlist = {len(discovered) + len(self.config.WATCHLIST)})"
+            f"Stage 1: {len(all_symbols)} tradeable symbols | "
+            f"{len(discovery_candidates)} discovery signals"
         )
-        return discovered
+
+        # Stage 2: Batch snapshot entire universe (price/volume filter)
+        logger.info("Stage 2: Fetching snapshots for full universe...")
+        snapshots = self.alpaca_data.get_multi_snapshots(all_symbols + ["SPY"])
+
+        # Quick filter: price and volume thresholds
+        passed_filter: list[str] = []
+        for sym in all_symbols:
+            snap = snapshots.get(sym)
+            if not snap:
+                continue
+            price = snap.get("price", 0)
+            volume = snap.get("volume", 0)
+            if MIN_PRICE <= price <= MAX_PRICE and volume >= MIN_AVG_VOLUME:
+                passed_filter.append(sym)
+
+        logger.info(f"Stage 2: {len(passed_filter)} passed price/volume filter")
+
+        # Stage 3: Weekly bars for filtered set + full scoring
+        logger.info("Stage 3: Fetching weekly bars and scoring...")
+        weekly_bars = self.alpaca_data.get_multi_bars(
+            passed_filter + ["SPY"], "1Week", days=90,
+        )
+
+        spy_4w = self._calc_return(weekly_bars.get("SPY", []), weeks=4)
+
+        scored = []
+        for ticker in passed_filter:
+            snap = snapshots.get(ticker, {})
+            price = snap.get("price", 0)
+            volume = snap.get("volume", 0)
+            daily_change = snap.get("daily_change_pct", 0)
+
+            wb = weekly_bars.get(ticker, [])
+            ticker_4w_return = self._calc_return(wb, weeks=4)
+            rel_strength = ticker_4w_return - spy_4w
+
+            if rel_strength < self.config.SCANNER_MIN_REL_STRENGTH:
+                continue
+
+            weekly_uptrend = self._check_weekly_trend(wb, sma_period=10)
+
+            prev_volume = snap.get("prev_volume", 0)
+            vol_ratio = volume / prev_volume if prev_volume > 0 else 1.0
+
+            # Composite score (0-100)
+            score = 0.0
+            score += max(0, min(30, (rel_strength + 5) * 2))
+            if weekly_uptrend:
+                score += 20
+            score += max(0, min(20, vol_ratio * 10))
+            sources = source_counts.get(ticker, 0)
+            score += min(15, sources * 5)
+            if daily_change > 0:
+                score += min(15, daily_change * 3)
+
+            scored.append({
+                "ticker": ticker,
+                "score": round(score, 1),
+                "rel_strength": round(rel_strength, 2),
+                "weekly_uptrend": weekly_uptrend,
+                "vol_ratio": round(vol_ratio, 2),
+                "daily_change": daily_change,
+                "price": price,
+                "sources": sources,
+            })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        if scored:
+            top5 = ", ".join(f"{s['ticker']}({s['score']})" for s in scored[:5])
+            logger.info(f"Stage 3: {len(scored)} scored | Top 5: {top5}")
+
+        top_n = self.config.SCANNER_TOP_N
+        result = [r["ticker"] for r in scored[:top_n]]
+
+        logger.info(
+            f"Scanner complete: {len(all_symbols)} universe → "
+            f"{len(passed_filter)} liquid → {len(scored)} scored → "
+            f"{len(result)} selected"
+        )
+        return result

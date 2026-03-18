@@ -39,33 +39,36 @@ class DeepThinkTrader:
         self.scanner = ScannerAgent(self.db)
         self._last_scan_date: str = ""
 
-    def _run_daily_scan(self) -> list[str]:
-        """Run the market scanner once per day to discover trending tickers."""
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self._last_scan_date == today:
-            return []
-
-        logger.info("Running daily market scan for trending stocks...")
+    def _run_scan(self) -> list[str]:
+        """Run full-universe scan every cycle. Fast (~60s) thanks to batch API calls."""
+        logger.info("Running full-universe scan...")
         try:
+            # Rebuild dynamic sector watchlist once per day
+            today = datetime.now().strftime("%Y-%m-%d")
+            if self._last_scan_date != today:
+                self._dynamic_watchlist = self.scanner.build_sector_watchlist()
+                self._last_scan_date = today
+
             discovered = self.scanner.scan()
-            self._last_scan_date = today
             if discovered:
-                logger.info(f"Scanner discovered {len(discovered)} tickers: {', '.join(discovered)}")
+                logger.info(f"Scanner selected {len(discovered)} tickers: {', '.join(discovered)}")
             else:
-                logger.info("Scanner found no new candidates today")
+                logger.info("Scanner found no candidates this cycle")
             return discovered
         except Exception as e:
             logger.error(f"Scanner error: {e}")
-            self._last_scan_date = today
             return []
 
     def run_cycle(self, tickers: list[str] | None = None) -> list[dict]:
         """Run one full research → analysis → execution cycle for all watchlist tickers."""
-        # Run daily scan to discover trending stocks
-        discovered = self._run_daily_scan()
+        # Run full-universe scan every cycle
+        discovered = self._run_scan()
+
+        # Use dynamic sector watchlist if available, fall back to static
+        watchlist = getattr(self, "_dynamic_watchlist", None) or self.config.WATCHLIST
 
         # Merge watchlist + discovered (no duplicates)
-        base_tickers = list(tickers or self.config.WATCHLIST)
+        base_tickers = list(tickers or watchlist)
         if discovered:
             for t in discovered:
                 if t not in base_tickers:
@@ -76,7 +79,7 @@ class DeepThinkTrader:
 
         logger.info(f"{'='*60}")
         logger.info(f"Starting cycle at {datetime.now().isoformat()}")
-        logger.info(f"Watchlist: {', '.join(self.config.WATCHLIST)}")
+        logger.info(f"Watchlist: {', '.join(watchlist)}")
         if discovered:
             logger.info(f"Scanner additions: {', '.join(discovered)}")
         logger.info(f"Total tickers this cycle: {len(tickers)}")
@@ -89,11 +92,6 @@ class DeepThinkTrader:
                 logger.info(f"Position closed: {ex['ticker']} — {ex['reason']} | P&L: ${ex['pnl']:.2f}")
 
         for ticker in tickers:
-            # Skip if already analyzed today (prevent duplicates across long cycles)
-            if self.db.was_recently_analyzed(ticker, minutes=720):  # 12 hours
-                logger.info(f"Skipping {ticker} — already analyzed today")
-                continue
-
             try:
                 # Step 1: Research
                 logger.info(f"\n--- Researching {ticker} ---")
@@ -136,20 +134,39 @@ class DeepThinkTrader:
         results = self.run_cycle([ticker])
         return results[0] if results else {"status": "ERROR", "message": "No result"}
 
+    def _is_market_hours(self) -> bool:
+        """Check if US market is currently open."""
+        now = datetime.now()
+        if now.weekday() > 4:
+            return False
+        market_minutes = now.hour * 60 + now.minute
+        return 9 * 60 + 30 <= market_minutes < 16 * 60
+
+    def _guarded_cycle(self) -> None:
+        """Only run analysis cycle during market hours."""
+        if not self._is_market_hours():
+            logger.info("Market closed — skipping cycle, will retry at next interval")
+            return
+        self.run_cycle()
+
     def start_scheduled(self) -> None:
         """Start the scheduled loop — runs every RESEARCH_INTERVAL_MINUTES."""
         interval = self.config.RESEARCH_INTERVAL_MINUTES
         logger.info(f"DeepThinkTrader starting — cycle every {interval} minutes")
-        logger.info(f"Watchlist: {', '.join(self.config.WATCHLIST)}")
-        logger.info(f"Account size: ${self.config.ACCOUNT_SIZE:,.0f}")
-        logger.info(f"Max risk/trade: {self.config.MAX_RISK_PER_TRADE*100}%")
-        logger.info(f"Min conviction: {self.config.MIN_CONVICTION}/10")
+        logger.info(f"Trade mode: {self.config.TRADE_MODE.upper()}")
+        logger.info(f"Max risk/trade: {self.config.MAX_RISK_PER_TRADE*100}% | "
+                     f"Daily loss limit: {self.config.MAX_DAILY_LOSS*100}% | "
+                     f"Min conviction: {self.config.MIN_CONVICTION}/10 | "
+                     f"R:R ratio: {self.config.MIN_REWARD_RISK_RATIO}:1")
+        logger.info(f"Max position: {self.config.MAX_POSITION_PCT*100:.0f}% | "
+                     f"Max positions: {self.config.MAX_OPEN_POSITIONS} | "
+                     f"Scanner top: {self.config.SCANNER_TOP_N}")
 
-        # Run immediately on startup
-        self.run_cycle()
+        # Run immediately if market is open
+        self._guarded_cycle()
 
         # Then schedule
-        schedule.every(interval).minutes.do(self.run_cycle)
+        schedule.every(interval).minutes.do(self._guarded_cycle)
 
         while True:
             schedule.run_pending()
