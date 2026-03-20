@@ -115,7 +115,7 @@ auto_refresh = st.sidebar.toggle("Auto Refresh", value=True)
 
 # Read interval from URL query param so it survives page reloads
 _qp = st.query_params
-_saved_interval = int(_qp.get("ri", "30"))
+_saved_interval = int(_qp.get("ri", "300"))
 _interval_options = [10, 15, 30, 60, 120, 300]
 if _saved_interval not in _interval_options:
     _saved_interval = 30
@@ -205,6 +205,19 @@ else:
 
 st.sidebar.markdown("---")
 
+# === PORTFOLIO FILTER ===
+st.sidebar.subheader("Portfolio")
+_portfolio_filter = st.sidebar.radio(
+    "View portfolio",
+    options=["all", "main", "penny"],
+    format_func=lambda p: {"all": "📊 All", "main": "📈 Main", "penny": "🪙 Penny ($1-$5)"}[p],
+    index=0,
+    horizontal=True,
+    label_visibility="collapsed",
+)
+
+st.sidebar.markdown("---")
+
 # === BOT HEALTH (Tier 1 #3) ===
 st.sidebar.subheader("Bot Health")
 
@@ -261,9 +274,10 @@ cash = float(account["cash"]) if account else 0
 starting_balance = 100_000.0
 total_pnl = equity - starting_balance
 
-all_trades = db.get_recent_trades(500)
+_pf = _portfolio_filter if _portfolio_filter != "all" else None
+all_trades = db.get_recent_trades(500, portfolio=_pf)
 total_trades = len(all_trades)
-open_trades_db = db.get_open_trades()
+open_trades_db = db.get_open_trades(portfolio=_pf)
 closed_trades = [t for t in all_trades if t.get("status") == "CLOSED"]
 winning_trades = [t for t in closed_trades if (t.get("pnl") or 0) > 0]
 losing_trades = [t for t in closed_trades if (t.get("pnl") or 0) < 0]
@@ -569,6 +583,18 @@ if positions:
             "P&L %": unrealized_pct,
         })
 
+    # Add cash (uninvested) as a line item
+    pos_data.append({
+        "Ticker": "💵 CASH",
+        "Details": "",
+        "Qty": 0,
+        "Avg Entry": 0,
+        "Current": 0,
+        "Market Value": cash,
+        "P&L": 0,
+        "P&L %": 0,
+    })
+
     df_pos = pd.DataFrame(pos_data)
 
     def _color_pnl(val):
@@ -577,14 +603,21 @@ if positions:
             return f"color: {color}; font-weight: bold"
         return ""
 
+    def _fmt_or_dash(val, fmt):
+        """Format value or show dash for zero (used for cash row)."""
+        if val == 0:
+            return "—"
+        return fmt.format(val)
+
     styled_pos = df_pos.style.map(
         _color_pnl, subset=["P&L", "P&L %"]
     ).format({
-        "Avg Entry": "${:,.2f}",
-        "Current": "${:,.2f}",
+        "Qty": lambda v: _fmt_or_dash(v, "{:,}"),
+        "Avg Entry": lambda v: _fmt_or_dash(v, "${:,.2f}"),
+        "Current": lambda v: _fmt_or_dash(v, "${:,.2f}"),
         "Market Value": "${:,.2f}",
-        "P&L": "${:+,.2f}",
-        "P&L %": "{:+.2f}%",
+        "P&L": lambda v: _fmt_or_dash(v, "${:+,.2f}"),
+        "P&L %": lambda v: _fmt_or_dash(v, "{:+.2f}%"),
     })
 
     st.dataframe(
@@ -608,12 +641,12 @@ if positions:
             invested_pct = (total_market_value / equity * 100) if equity > 0 else 0
             st.metric("% Invested", f"{invested_pct:.1f}%")
 
-        # P&L bar chart
-        if len(pos_data) > 1:
+        # P&L bar chart (exclude CASH row)
+        if len(positions) > 1:
             pnl_df = pd.DataFrame([{
-                "ticker": p["Ticker"],
-                "pnl": float(positions[i].get("unrealized_pl", 0)),
-            } for i, p in enumerate(pos_data)])
+                "ticker": p["symbol"],
+                "pnl": float(p.get("unrealized_pl", 0)),
+            } for p in positions])
             colors = ["#4CAF50" if x >= 0 else "#F44336" for x in pnl_df["pnl"]]
             fig_pnl = go.Figure(go.Bar(x=pnl_df["ticker"], y=pnl_df["pnl"], marker_color=colors))
             fig_pnl.update_layout(title="P&L by Position", yaxis_title="P&L ($)", height=250,
@@ -623,9 +656,9 @@ if positions:
     with pcol2:
         # Allocation pie chart + sector breakdown (Tier 2 #9)
         alloc_df = pd.DataFrame([{
-            "Ticker": p["Ticker"],
-            "Value": abs(float(positions[i].get("market_value", 0))),
-        } for i, p in enumerate(pos_data)])
+            "Ticker": p["symbol"],
+            "Value": abs(float(p.get("market_value", 0))),
+        } for p in positions])
         if cash > 0:
             alloc_df = pd.concat([alloc_df, pd.DataFrame([{"Ticker": "CASH", "Value": cash}])], ignore_index=True)
 
@@ -647,13 +680,13 @@ if positions:
                     sectors[t] = "Unknown"
             return sectors
 
-        pos_tickers = [p["Ticker"] for p in pos_data]
+        pos_tickers = [p["symbol"] for p in positions]
         if pos_tickers:
             sectors = get_sectors(tuple(pos_tickers))
             sector_values = {}
-            for i, p in enumerate(pos_data):
-                s = sectors.get(p["Ticker"], "Unknown")
-                val = abs(float(positions[i].get("market_value", 0)))
+            for p in positions:
+                s = sectors.get(p["symbol"], "Unknown")
+                val = abs(float(p.get("market_value", 0)))
                 sector_values[s] = sector_values.get(s, 0) + val
 
             if sector_values:
@@ -857,7 +890,7 @@ st.divider()
 # ──────────────────────────────────────────────
 
 st.subheader("Recent Analyses")
-analyses = db.get_recent_analyses(100)
+analyses = db.get_recent_analyses(100, portfolio=_pf)
 if analyses:
     df_analysis = pd.DataFrame(analyses)
 
@@ -960,6 +993,44 @@ with st.expander("Alpaca API Request IDs (debugging)"):
     else:
         st.info("No API calls logged yet")
 
+# ──────────────────────────────────────────────
+# STRATEGY HEALTH (Phase 5c)
+# ──────────────────────────────────────────────
+
+st.subheader("Strategy Health")
+
+def _show_strategy_health(portfolio_name: str):
+    stats = db.get_strategy_stats(portfolio_name, days=30)
+    baseline = db.get_strategy_stats(portfolio_name, days=90)
+    if stats["trade_count"] < 5:
+        st.info(f"Not enough closed trades for {portfolio_name} portfolio health (need 5+, have {stats['trade_count']})")
+        return
+
+    hcol1, hcol2, hcol3, hcol4, hcol5 = st.columns(5)
+    with hcol1:
+        wr = stats["win_rate"] * 100
+        st.metric(f"{portfolio_name.title()} Win Rate (30d)", f"{wr:.0f}%")
+    with hcol2:
+        st.metric("Expectancy", f"${stats['expectancy']:+,.2f}")
+    with hcol3:
+        pf = stats.get("profit_factor", 0)
+        st.metric("Profit Factor", f"{pf:.2f}" if pf > 0 else "N/A")
+    with hcol4:
+        st.metric("Payoff Ratio", f"{stats['payoff_ratio']:.2f}" if stats["payoff_ratio"] > 0 else "N/A")
+    with hcol5:
+        if baseline["trade_count"] >= 20:
+            delta = (stats["win_rate"] - baseline["win_rate"]) * 100
+            color = "normal" if delta >= 0 else "inverse"
+            st.metric("WR vs 90d Baseline", f"{delta:+.0f}%")
+        else:
+            st.metric("WR vs 90d Baseline", "N/A")
+
+_show_strategy_health("main")
+if config.PENNY_ENABLED:
+    _show_strategy_health("penny")
+
+st.divider()
+
 # Footer
 st.divider()
-st.caption("DeepThinkTrader v1.0 — Paper Trading Mode | Dashboard auto-refreshes on Streamlit file change")
+st.caption("DeepThinkTrader v2.0 — Paper Trading Mode | Risk-First Framework | Dashboard auto-refreshes on Streamlit file change")

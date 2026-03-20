@@ -6,6 +6,7 @@ import logging
 
 from config import Config
 from utils.database import Database
+from utils.yahoo_fundamentals import YahooFundamentals
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ class DeepThinkAgent:
     def __init__(self, db: Database | None = None):
         self.config = Config()
         self.db = db or Database()
+        self.yahoo = YahooFundamentals()
 
     def _score_factors(self, report: dict) -> tuple[list[dict], list[dict]]:
         """Extract and score bullish/bearish factors from research report."""
@@ -246,10 +248,96 @@ class DeepThinkAgent:
         conviction = base + signal_bonus + catalyst_bonus
         return round(max(1, min(10, conviction)), 1)
 
-    def analyze(self, report: dict) -> dict:
+    # ── Phase 3: Multi-Edge Validation ──────────────────────────
+
+    def _evaluate_technical_edge(self, report: dict) -> dict:
+        """Phase 3b: Technical edge — price above 200-day SMA, RSI oversold, volume breakout."""
+        tech = report.get("technicals", {})
+        fundamentals = report.get("fundamentals", {})
+        criteria_met = 0
+        details = []
+
+        # 1. Price above 200-day SMA (for longs)
+        current_price = tech.get("current_price", 0)
+        fin = fundamentals.get("financials", {}) if fundamentals else {}
+        sma_200 = fin.get("200d_avg")
+        if sma_200 and current_price and current_price > sma_200:
+            criteria_met += 1
+            details.append(f"Above 200-SMA (${current_price:.2f} > ${sma_200:.2f})")
+
+        # 2. RSI(14) in oversold zone (< 30) or neutral-bullish (< 45)
+        rsi = tech.get("rsi_14", 50)
+        if rsi < 30:
+            criteria_met += 1
+            details.append(f"RSI oversold ({rsi})")
+        elif rsi < 45:
+            criteria_met += 1
+            details.append(f"RSI neutral-bullish ({rsi})")
+
+        # 3. Volume > 1.5x 20-day average
+        vol_ratio = tech.get("volume_ratio", 1)
+        if vol_ratio > 1.5:
+            criteria_met += 1
+            details.append(f"Volume breakout ({vol_ratio:.1f}x avg)")
+
+        passed = criteria_met >= 2
+        return {"passed": passed, "strength": criteria_met, "details": details, "label": "Technical"}
+
+    def _evaluate_sentiment_edge(self, report: dict) -> dict:
+        """Phase 3c: Sentiment/Regime edge — VIX, news catalyst score."""
+        criteria_met = 0
+        details = []
+
+        # 1. Combined catalyst score positive
+        catalyst = report.get("combined_catalyst_score", 0)
+        if catalyst > 0.2:
+            criteria_met += 1
+            details.append(f"Positive catalyst ({catalyst:.3f})")
+
+        # 2. News sentiment positive
+        news_score = report.get("news_impact_score", 0)
+        if news_score > 2:
+            criteria_met += 1
+            details.append(f"Bullish news ({news_score}/10)")
+
+        # 3. Reddit sentiment positive
+        reddit_score = report.get("reddit_sentiment_score", 0)
+        if reddit_score > 0.3:
+            criteria_met += 1
+            details.append(f"Bullish Reddit ({reddit_score:.2f})")
+
+        passed = criteria_met >= 2
+        return {"passed": passed, "strength": criteria_met, "details": details, "label": "Sentiment"}
+
+    def _evaluate_edges(self, report: dict) -> tuple[int, list[dict]]:
+        """Run all 3 edge checks and return (edges_firing, edge_details)."""
+        ticker = report["ticker"]
+
+        # Edge 1: Fundamental
+        fund_edge = self.yahoo.evaluate_fundamental_edge(ticker)
+
+        # Edge 2: Technical
+        tech_edge = self._evaluate_technical_edge(report)
+
+        # Edge 3: Sentiment/Regime
+        sent_edge = self._evaluate_sentiment_edge(report)
+
+        edges = [fund_edge, tech_edge, sent_edge]
+        edges_firing = sum(1 for e in edges if e["passed"])
+
+        logger.info(
+            f"Edge validation for {ticker}: {edges_firing}/3 edges firing — "
+            f"Fund={'PASS' if fund_edge['passed'] else 'FAIL'}, "
+            f"Tech={'PASS' if tech_edge['passed'] else 'FAIL'}, "
+            f"Sent={'PASS' if sent_edge['passed'] else 'FAIL'}"
+        )
+
+        return edges_firing, edges
+
+    def analyze(self, report: dict, portfolio: str = "main") -> dict:
         """Run full deep-think analysis on a research report."""
         ticker = report["ticker"]
-        logger.info(f"DeepThink analysis starting for {ticker}...")
+        logger.info(f"DeepThink analysis starting for {ticker} [{portfolio}]...")
 
         # Step 1 & 2: Score factors
         bullish, bearish = self._score_factors(report)
@@ -286,30 +374,54 @@ class DeepThinkAgent:
         else:
             stop_loss_pct = round(base_stop * 1.2, 1)
 
+        # Use portfolio-specific parameters
+        if portfolio == "penny":
+            min_rr = self.config.PENNY_MIN_REWARD_RISK_RATIO
+            max_risk = self.config.PENNY_MAX_RISK_PER_TRADE
+            min_conv = self.config.PENNY_MIN_CONVICTION
+        else:
+            min_rr = self.config.MIN_REWARD_RISK_RATIO
+            max_risk = self.config.MAX_RISK_PER_TRADE
+            min_conv = self.config.MIN_CONVICTION
+
         # Use math.ceil to ensure take_profit always meets the R:R ratio after rounding
         import math
-        take_profit_pct = math.ceil(stop_loss_pct * self.config.MIN_REWARD_RISK_RATIO * 10) / 10
+        take_profit_pct = math.ceil(stop_loss_pct * min_rr * 10) / 10
         position_size_pct = round(
-            (self.config.MAX_RISK_PER_TRADE * 100) / (stop_loss_pct / 100), 2
+            (max_risk * 100) / (stop_loss_pct / 100), 2
         )
         position_size_pct = min(position_size_pct, 10)  # Cap at 10% of account
 
-        # Step 6: Decision
-        if conviction >= self.config.MIN_CONVICTION and catalyst > 0:
+        # Step 6: Edge validation (Phase 3)
+        edges_firing, edge_details = self._evaluate_edges(report)
+
+        # Step 7: Decision — require at least MIN_EDGES_REQUIRED edges
+        if edges_firing < self.config.MIN_EDGES_REQUIRED:
+            action = "HOLD"
+            edge_reason = f"Only {edges_firing}/{self.config.MIN_EDGES_REQUIRED} edges firing"
+        elif conviction >= min_conv and catalyst > 0:
             action = "BUY"
-        elif conviction >= self.config.MIN_CONVICTION and catalyst < 0:
+            edge_reason = f"{edges_firing}/3 edges confirmed"
+        elif conviction >= min_conv and catalyst < 0:
             action = "SELL"
+            edge_reason = f"{edges_firing}/3 edges confirmed"
         else:
             action = "HOLD"
+            edge_reason = "Conviction below threshold"
 
         # Build reasoning summary
         top_bull = sorted(bullish, key=lambda x: x["strength"], reverse=True)[:2]
         top_bear = sorted(bearish, key=lambda x: x["strength"], reverse=True)[:2]
+        edge_summary = " | ".join(
+            f"{e['label']}: {'PASS' if e['passed'] else 'FAIL'} ({', '.join(e['details'][:2])})"
+            for e in edge_details
+        )
         reasoning = (
             f"Top bullish: {', '.join(f['factor'] for f in top_bull)}. "
             f"Top bearish: {', '.join(f['factor'] for f in top_bear)}. "
             f"Combined catalyst: {catalyst:.3f}. "
-            f"{'Conviction meets threshold — executing.' if action != 'HOLD' else 'Conviction below threshold — holding.'}"
+            f"Edges: {edge_summary}. "
+            f"{edge_reason}."
         )
 
         analysis = {
@@ -326,9 +438,14 @@ class DeepThinkAgent:
             "scenarios": scenarios,
             "risks": [f["factor"] for f in sorted(bearish, key=lambda x: x["strength"], reverse=True)[:3]],
             "current_price": current_price,
+            "edges_firing": edges_firing,
+            "edge_details": [
+                {"label": e["label"], "passed": e["passed"], "strength": e["strength"], "details": e["details"]}
+                for e in edge_details
+            ],
         }
 
-        self.db.save_analysis(analysis)
-        logger.info(f"DeepThink result for {ticker}: {action} (conviction: {conviction})")
+        self.db.save_analysis(analysis, portfolio=portfolio)
+        logger.info(f"DeepThink result for {ticker} [{portfolio}]: {action} (conviction: {conviction})")
 
         return analysis

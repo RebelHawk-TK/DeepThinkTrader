@@ -205,6 +205,88 @@ class YahooFundamentals:
             logger.debug(f"Insider data error: {e}")
             return {"activity": "no data"}
 
+    def evaluate_fundamental_edge(self, ticker: str) -> dict:
+        """Phase 3a: Score fundamental edge — pass/fail + strength (0-4).
+
+        Checks: P/E below sector median, ROE > 15%, earnings growth > 10%, debt/equity manageable.
+        """
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.info or {}
+
+            criteria_met = 0
+            details = []
+
+            # 1. P/E below 5-year sector median (proxy: PE < 20 or forward PE < current PE)
+            pe = info.get("trailingPE")
+            forward_pe = info.get("forwardPE")
+            if pe and pe < 20:
+                criteria_met += 1
+                details.append(f"P/E {pe:.1f} (reasonable)")
+            elif forward_pe and pe and forward_pe < pe:
+                criteria_met += 1
+                details.append(f"Forward P/E improving ({forward_pe:.1f} vs {pe:.1f})")
+
+            # 2. ROE > 15% (proxy for ROIC > WACC)
+            roe = info.get("returnOnEquity")
+            if roe and roe > 0.15:
+                criteria_met += 1
+                details.append(f"ROE {roe*100:.1f}%")
+
+            # 3. Earnings growth > 10% YoY
+            earnings_growth = info.get("earningsGrowth") or info.get("revenueGrowth")
+            if earnings_growth and earnings_growth > 0.10:
+                criteria_met += 1
+                details.append(f"Growth {earnings_growth*100:.1f}%")
+
+            # 4. Debt/equity < 100 (reasonable)
+            de = info.get("debtToEquity")
+            if de is not None and de < 100:
+                criteria_met += 1
+                details.append(f"D/E {de:.0f}")
+            elif de is None:
+                # No debt data for some stocks (financials, etc.) — pass by default
+                criteria_met += 1
+                details.append("D/E N/A (pass)")
+
+            passed = criteria_met >= 3
+            return {
+                "passed": passed,
+                "strength": criteria_met,
+                "details": details,
+                "label": "Fundamental",
+            }
+
+        except Exception as e:
+            logger.debug(f"Fundamental edge error for {ticker}: {e}")
+            return {"passed": False, "strength": 0, "details": [str(e)], "label": "Fundamental"}
+
+    def get_earnings_date(self, ticker: str) -> dict:
+        """Get next earnings date and days until for earnings proximity checks."""
+        try:
+            stock = yf.Ticker(ticker)
+            cal = stock.calendar
+            if cal is None:
+                return {"next_date": None, "days_until": None}
+
+            earn_date = None
+            if isinstance(cal, dict):
+                ed = cal.get("Earnings Date")
+                if ed:
+                    earn_date = str(ed[0]) if isinstance(ed, list) and ed else str(ed)
+            elif hasattr(cal, "iloc") and len(cal) > 0:
+                earn_date = str(cal.iloc[0])
+
+            if earn_date:
+                earn_dt = datetime.strptime(earn_date[:10], "%Y-%m-%d")
+                days = (earn_dt - datetime.now()).days
+                return {"next_date": earn_date[:10], "days_until": days}
+
+        except Exception as e:
+            logger.debug(f"Earnings date error for {ticker}: {e}")
+
+        return {"next_date": None, "days_until": None}
+
     def _get_institutional_data(self, stock: yf.Ticker) -> dict:
         """Summarize institutional ownership."""
         try:

@@ -58,6 +58,9 @@ class Config:
     # Trade mode: safe, normal, aggressive (set via TRADE_MODE env var or .env)
     TRADE_MODE: str = os.getenv("TRADE_MODE", "normal").lower()
 
+    # Penny stock portfolio: enabled by default, runs alongside main portfolio
+    PENNY_ENABLED: bool = os.getenv("PENNY_ENABLED", "true").lower() == "true"
+
     # Load mode preset, fall back to normal if invalid
     _mode = TRADE_MODES.get(TRADE_MODE, TRADE_MODES["normal"])
 
@@ -101,6 +104,48 @@ class Config:
     SCANNER_TOP_N: int = int(os.getenv(
         "SCANNER_TOP_N", str(_mode["SCANNER_TOP_N"])))
     SCANNER_MIN_REL_STRENGTH: float = float(os.getenv("SCANNER_MIN_REL_STRENGTH", "-5.0"))
+
+    # ── Penny Stock Portfolio Parameters ──────────────────────────
+    PENNY_MAX_RISK_PER_TRADE: float = float(os.getenv("PENNY_MAX_RISK_PER_TRADE", "0.03"))
+    PENNY_MAX_DAILY_LOSS: float = float(os.getenv("PENNY_MAX_DAILY_LOSS", "0.08"))
+    PENNY_MIN_CONVICTION: float = float(os.getenv("PENNY_MIN_CONVICTION", "6.0"))
+    PENNY_MIN_REWARD_RISK_RATIO: float = float(os.getenv("PENNY_MIN_REWARD_RISK_RATIO", "1.5"))
+    PENNY_MAX_POSITION_PCT: float = float(os.getenv("PENNY_MAX_POSITION_PCT", "0.02"))
+    PENNY_MAX_OPEN_POSITIONS: int = int(os.getenv("PENNY_MAX_OPEN_POSITIONS", "5"))
+    PENNY_SCANNER_TOP_N: int = int(os.getenv("PENNY_SCANNER_TOP_N", "15"))
+    PENNY_MIN_PRICE: float = float(os.getenv("PENNY_MIN_PRICE", "1.0"))
+    PENNY_MAX_PRICE: float = float(os.getenv("PENNY_MAX_PRICE", "5.0"))
+    PENNY_MIN_AVG_VOLUME: int = int(os.getenv("PENNY_MIN_AVG_VOLUME", "100000"))
+    PENNY_SUBREDDITS: list[str] = ["pennystocks", "wallstreetbets", "stocks"]
+
+    # ── Phase 1: Risk-First Gate ──────────────────────────────────
+    RISK_PCT_PER_TRADE: float = float(os.getenv("RISK_PCT_PER_TRADE", "0.01"))
+    MAX_DRAWDOWN_HALT_PCT: float = float(os.getenv("MAX_DRAWDOWN_HALT_PCT", "0.08"))
+    VOLATILITY_ATR_MULTIPLIER: float = float(os.getenv("VOLATILITY_ATR_MULTIPLIER", "3.0"))
+    MIN_ADV_RATIO: int = int(os.getenv("MIN_ADV_RATIO", "5"))
+    KELLY_SAFETY_MULTIPLIER: float = float(os.getenv("KELLY_SAFETY_MULTIPLIER", "0.5"))
+    MAX_RISK_OF_RUIN_PCT: float = float(os.getenv("MAX_RISK_OF_RUIN_PCT", "0.01"))
+
+    # ── Phase 2: Exit Improvements ────────────────────────────────
+    EXIT_CHECK_INTERVAL_MINUTES: int = int(os.getenv("EXIT_CHECK_INTERVAL_MINUTES", "5"))
+    TRAILING_STOP_ACTIVATION_PCT: float = float(os.getenv("TRAILING_STOP_ACTIVATION_PCT", "2.0"))
+    TRAILING_STOP_DISTANCE_PCT: float = float(os.getenv("TRAILING_STOP_DISTANCE_PCT", "1.5"))
+    PENNY_TRAILING_STOP_DISTANCE_PCT: float = float(os.getenv("PENNY_TRAILING_STOP_DISTANCE_PCT", "3.0"))
+    SCALE_OUT_ENABLED: bool = os.getenv("SCALE_OUT_ENABLED", "true").lower() == "true"
+    SCALE_OUT_LEVELS: list[float] = [float(x) for x in os.getenv("SCALE_OUT_LEVELS", "1.0,2.0").split(",")]
+    TIME_STOP_DAYS: int = int(os.getenv("TIME_STOP_DAYS", "15"))
+
+    # ── Phase 3: Edge Validation ──────────────────────────────────
+    MIN_EDGES_REQUIRED: int = int(os.getenv("MIN_EDGES_REQUIRED", "2"))
+
+    # ── Phase 4: Smart Orders ─────────────────────────────────────
+    PENNY_LIMIT_SLIPPAGE_PCT: float = float(os.getenv("PENNY_LIMIT_SLIPPAGE_PCT", "0.5"))
+    MAX_SLIPPAGE_PCT: float = float(os.getenv("MAX_SLIPPAGE_PCT", "0.3"))
+
+    # ── Phase 5: Market Awareness + Learning ──────────────────────
+    CIRCUIT_BREAKER_SPY_DROP_PCT: float = float(os.getenv("CIRCUIT_BREAKER_SPY_DROP_PCT", "-2.0"))
+    EARNINGS_EXIT_DAYS: int = int(os.getenv("EARNINGS_EXIT_DAYS", "2"))
+    EARNINGS_EXIT_MODE: str = os.getenv("EARNINGS_EXIT_MODE", "close")
 
     # Database
     DB_PATH: str = os.path.join(os.path.dirname(__file__), "trades.db")
