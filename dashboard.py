@@ -406,6 +406,124 @@ if closed_trades:
     with pcol6:
         st.metric("90d P&L", f"${pnl90:+,.2f}" if pnl90 is not None else "N/A")
 
+# ── Edge Quality Metrics (v2.0) ───────────────
+# Compute from trades that have edges_fired column
+_trades_with_edges = [t for t in all_trades if t.get("edges_fired") is not None]
+if _trades_with_edges:
+    _avg_edges = np.mean([t["edges_fired"] for t in _trades_with_edges])
+    _edge_trades_passed = sum(1 for t in _trades_with_edges if t["edges_fired"] >= config.MIN_EDGES_REQUIRED)
+    _edge_hit_rate = (_edge_trades_passed / len(_trades_with_edges) * 100) if _trades_with_edges else 0
+
+    ecol1, ecol2, ecol3 = st.columns(3)
+    with ecol1:
+        st.metric("Avg Edges/Trade", f"{_avg_edges:.1f}/3")
+    with ecol2:
+        st.metric("Edge Pass Rate", f"{_edge_hit_rate:.0f}%")
+    with ecol3:
+        # Breakdown by edge type from closed trades with edge_details
+        _edge_labels = {"Fundamental": 0, "Technical": 0, "Sentiment": 0}
+        _edge_totals = {"Fundamental": 0, "Technical": 0, "Sentiment": 0}
+        for t in _trades_with_edges:
+            details = t.get("edge_details")
+            if details:
+                try:
+                    edges = json.loads(details) if isinstance(details, str) else details
+                    for e in edges:
+                        lbl = e.get("label", "")
+                        if lbl in _edge_labels:
+                            _edge_totals[lbl] += 1
+                            if e.get("passed"):
+                                _edge_labels[lbl] += 1
+                except Exception:
+                    pass
+        edge_rates = []
+        for lbl in ["Fundamental", "Technical", "Sentiment"]:
+            total = _edge_totals[lbl]
+            passed = _edge_labels[lbl]
+            rate = f"{passed}/{total}" if total > 0 else "—"
+            edge_rates.append(f"{lbl[:4]}: {rate}")
+        st.metric("Edge Breakdown", " | ".join(edge_rates))
+
+st.divider()
+
+# ──────────────────────────────────────────────
+# STRATEGY HEALTH (Phase 5c) — Moved up for visibility
+# ──────────────────────────────────────────────
+
+st.subheader("Strategy Health")
+
+def _show_strategy_health_top(portfolio_name: str):
+    stats = db.get_strategy_stats(portfolio_name, days=30)
+    baseline = db.get_strategy_stats(portfolio_name, days=90)
+    if stats["trade_count"] < 5:
+        st.info(f"Not enough closed trades for {portfolio_name} portfolio health (need 5+, have {stats['trade_count']})")
+        return
+
+    hcol1, hcol2, hcol3, hcol4, hcol5 = st.columns(5)
+    with hcol1:
+        wr = stats["win_rate"] * 100
+        st.metric(f"{portfolio_name.title()} Win Rate (30d)", f"{wr:.0f}%")
+    with hcol2:
+        st.metric("Expectancy", f"${stats['expectancy']:+,.2f}")
+    with hcol3:
+        pf = stats.get("profit_factor", 0)
+        st.metric("Profit Factor", f"{pf:.2f}" if pf > 0 else "N/A")
+    with hcol4:
+        st.metric("Payoff Ratio", f"{stats['payoff_ratio']:.2f}" if stats["payoff_ratio"] > 0 else "N/A")
+    with hcol5:
+        if baseline["trade_count"] >= 20:
+            delta = (stats["win_rate"] - baseline["win_rate"]) * 100
+            st.metric("WR vs 90d Baseline", f"{delta:+.0f}%")
+        else:
+            st.metric("WR vs 90d Baseline", "N/A")
+
+    # Expectancy trend chart — rolling 10-trade windows
+    if stats["trade_count"] >= 10:
+        with db._get_conn() as conn:
+            from datetime import timedelta
+            cutoff = (dt.now() - timedelta(days=90)).isoformat()
+            rows = conn.execute(
+                """SELECT pnl, timestamp FROM trades
+                   WHERE status = 'CLOSED' AND portfolio = ? AND timestamp >= ? AND pnl IS NOT NULL
+                   ORDER BY timestamp""",
+                (portfolio_name, cutoff),
+            ).fetchall()
+        if len(rows) >= 10:
+            pnl_list = [r["pnl"] for r in rows]
+            ts_list = [r["timestamp"] for r in rows]
+            window = 10
+            exp_points = []
+            for i in range(window, len(pnl_list) + 1):
+                w = pnl_list[i - window:i]
+                wins = [p for p in w if p > 0]
+                losses = [p for p in w if p <= 0]
+                wr = len(wins) / len(w)
+                avg_w = np.mean(wins) if wins else 0
+                avg_l = abs(np.mean(losses)) if losses else 0
+                exp = (wr * avg_w) - ((1 - wr) * avg_l)
+                exp_points.append({"timestamp": ts_list[i - 1], "expectancy": exp})
+
+            if exp_points:
+                df_exp = pd.DataFrame(exp_points)
+                df_exp["timestamp"] = pd.to_datetime(df_exp["timestamp"])
+                fig_exp = go.Figure()
+                colors = ["#4CAF50" if e >= 0 else "#F44336" for e in df_exp["expectancy"]]
+                fig_exp.add_trace(go.Bar(
+                    x=df_exp["timestamp"], y=df_exp["expectancy"],
+                    marker_color=colors, name="Expectancy",
+                ))
+                fig_exp.add_hline(y=0, line_color="gray", line_width=1)
+                fig_exp.update_layout(
+                    title=f"{portfolio_name.title()} — Rolling 10-Trade Expectancy",
+                    yaxis_title="Expectancy ($)", height=220,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                )
+                st.plotly_chart(fig_exp, use_container_width=True)
+
+_show_strategy_health_top("main")
+if config.PENNY_ENABLED:
+    _show_strategy_health_top("penny")
+
 st.divider()
 
 # ──────────────────────────────────────────────
@@ -561,6 +679,9 @@ st.divider()
 
 st.subheader("Current Positions (Live)")
 if positions:
+    # Build lookup of DB trade data for open positions (trailing stops, risk, edges)
+    _open_db_trades = {t["ticker"]: t for t in open_trades_db}
+
     pos_data = []
     total_unrealized_pos = 0
     total_market_value = 0
@@ -572,27 +693,63 @@ if positions:
         market_val = float(p.get("market_value", 0))
         total_unrealized_pos += unrealized
         total_market_value += market_val
+
+        ticker = p["symbol"]
+        db_trade = _open_db_trades.get(ticker, {})
+        trailing_active = db_trade.get("trailing_stop_active", 0)
+        trailing_stop = db_trade.get("trailing_stop_price")
+        highest = db_trade.get("highest_price")
+        risk_amt = db_trade.get("risk_amount", 0)
+        original_qty = db_trade.get("original_quantity")
+        current_qty = int(p["qty"])
+        edges = db_trade.get("edges_fired")
+
+        # Calculate R-multiple
+        r_multiple = ""
+        entry = float(p["avg_entry_price"])
+        current = float(p["current_price"])
+        if risk_amt and risk_amt > 0 and original_qty and original_qty > 0:
+            r_per_share = risk_amt / original_qty
+            profit_per_share = current - entry
+            if r_per_share > 0:
+                r_multiple = f"{profit_per_share / r_per_share:.1f}R"
+
+        # Scale-out indicator
+        scaled = ""
+        if original_qty and current_qty < original_qty:
+            scaled = f"{current_qty}/{original_qty}"
+
         pos_data.append({
-            "Ticker": p["symbol"],
-            "Details": f"{YAHOO_URL}/{p['symbol']}",
-            "Qty": int(p["qty"]),
-            "Avg Entry": float(p["avg_entry_price"]),
-            "Current": float(p["current_price"]),
+            "Ticker": ticker,
+            "Details": f"{YAHOO_URL}/{ticker}",
+            "Qty": current_qty,
+            "Scaled": scaled,
+            "Avg Entry": entry,
+            "Current": current,
             "Market Value": market_val,
             "P&L": unrealized,
             "P&L %": unrealized_pct,
+            "R-Mult": r_multiple,
+            "Trail": f"${trailing_stop:.2f}" if trailing_active and trailing_stop else "—",
+            "High": f"${highest:.2f}" if highest else "—",
+            "Edges": f"{edges}/3" if edges is not None else "—",
         })
 
     # Add cash (uninvested) as a line item
     pos_data.append({
-        "Ticker": "💵 CASH",
+        "Ticker": "CASH",
         "Details": "",
         "Qty": 0,
+        "Scaled": "",
         "Avg Entry": 0,
         "Current": 0,
         "Market Value": cash,
         "P&L": 0,
         "P&L %": 0,
+        "R-Mult": "",
+        "Trail": "—",
+        "High": "—",
+        "Edges": "—",
     })
 
     df_pos = pd.DataFrame(pos_data)
@@ -773,6 +930,18 @@ if all_trades:
             axis=1,
         )
 
+    # Edges fired column
+    if "edges_fired" in df_trades.columns:
+        df_trades["edges"] = df_trades["edges_fired"].apply(lambda x: f"{int(x)}/3" if x is not None and pd.notna(x) else "—")
+
+    # Risk amount column
+    if "risk_amount" in df_trades.columns:
+        df_trades["risk"] = df_trades["risk_amount"].apply(lambda x: f"${x:,.2f}" if x and pd.notna(x) and x > 0 else "—")
+
+    # Exit reason column (clean up for display)
+    if "exit_reason" in df_trades.columns:
+        df_trades["exit"] = df_trades["exit_reason"].apply(lambda x: x if x and pd.notna(x) else "—")
+
     # Format prices
     for col in ["entry_price", "exit_price", "stop_loss_price", "take_profit_price"]:
         if col in df_trades.columns:
@@ -784,7 +953,8 @@ if all_trades:
 
     display_cols = [
         "ticker", "details", "action", "quantity", "entry_price", "invested", "stop_loss_price",
-        "take_profit_price", "exit_price", "conviction", "pnl", "hold_time", "status", "timestamp",
+        "take_profit_price", "exit_price", "conviction", "edges", "risk", "pnl", "exit",
+        "hold_time", "status", "timestamp",
     ]
     available_cols = [c for c in display_cols if c in df_trades.columns]
     st.dataframe(
@@ -894,33 +1064,44 @@ analyses = db.get_recent_analyses(100, portfolio=_pf)
 if analyses:
     df_analysis = pd.DataFrame(analyses)
 
-    # Extract fields from stored JSON
-    extra_cols = {"price": [], "technical_score": [], "fundamental_score": [],
-                  "catalyst_score": [], "pattern_score": [], "earnings_risk": []}
+    # Extract fields from stored JSON — now with edge data
+    extra_cols = {"price": [], "edges_firing": [], "fund_edge": [], "tech_edge": [], "sent_edge": []}
     for a in analyses:
         try:
             data = json.loads(a.get("analysis_json", "{}"))
             extra_cols["price"].append(data.get("current_price"))
-            extra_cols["technical_score"].append(data.get("technical_score"))
-            extra_cols["fundamental_score"].append(data.get("fundamental_score"))
-            extra_cols["catalyst_score"].append(data.get("catalyst_score"))
-            extra_cols["pattern_score"].append(data.get("pattern_score"))
-            extra_cols["earnings_risk"].append(data.get("earnings_risk"))
+            ef = data.get("edges_firing")
+            extra_cols["edges_firing"].append(ef)
+
+            # Parse individual edge results
+            edge_details = data.get("edge_details", [])
+            fund = tech = sent = None
+            for ed in edge_details:
+                lbl = ed.get("label", "")
+                passed = ed.get("passed", False)
+                if lbl == "Fundamental":
+                    fund = passed
+                elif lbl == "Technical":
+                    tech = passed
+                elif lbl == "Sentiment":
+                    sent = passed
+            extra_cols["fund_edge"].append(fund)
+            extra_cols["tech_edge"].append(tech)
+            extra_cols["sent_edge"].append(sent)
         except Exception:
             for k in extra_cols:
                 extra_cols[k].append(None)
 
     df_analysis["price"] = [f"${x:,.2f}" if x else "N/A" for x in extra_cols["price"]]
-    df_analysis["tech"] = extra_cols["technical_score"]
-    df_analysis["fund"] = extra_cols["fundamental_score"]
-    df_analysis["cata"] = extra_cols["catalyst_score"]
-    df_analysis["patt"] = extra_cols["pattern_score"]
-    df_analysis["earn_risk"] = extra_cols["earnings_risk"]
+    df_analysis["edges"] = [f"{x}/3" if x is not None else "—" for x in extra_cols["edges_firing"]]
+    df_analysis["fund"] = [("PASS" if x else "FAIL") if x is not None else "—" for x in extra_cols["fund_edge"]]
+    df_analysis["tech"] = [("PASS" if x else "FAIL") if x is not None else "—" for x in extra_cols["tech_edge"]]
+    df_analysis["sent"] = [("PASS" if x else "FAIL") if x is not None else "—" for x in extra_cols["sent_edge"]]
 
     df_analysis["details"] = df_analysis["ticker"].apply(lambda t: f"{YAHOO_URL}/{t}")
 
-    display_cols = ["ticker", "details", "price", "action", "conviction", "tech", "fund", "cata", "patt",
-                    "earn_risk", "stop_loss_pct", "take_profit_pct", "timestamp"]
+    display_cols = ["ticker", "details", "price", "action", "conviction", "edges",
+                    "fund", "tech", "sent", "stop_loss_pct", "take_profit_pct", "timestamp"]
     available_cols = [c for c in display_cols if c in df_analysis.columns]
     st.dataframe(
         df_analysis[available_cols],
@@ -930,14 +1111,18 @@ if analyses:
         },
     )
 
-    # Analysis-to-trade conversion rate
+    # Analysis-to-trade conversion rate + edge stats
     total_analyses = len(analyses)
     buy_count = sum(1 for a in analyses if a.get("action") == "BUY")
     sell_count = sum(1 for a in analyses if a.get("action") == "SELL")
     hold_count = total_analyses - buy_count - sell_count
     conversion = ((buy_count + sell_count) / total_analyses * 100) if total_analyses > 0 else 0
 
-    acol1, acol2, acol3, acol4 = st.columns(4)
+    # Edge-blocked vs conviction-blocked
+    _edges_list = [e for e in extra_cols["edges_firing"] if e is not None]
+    _edge_blocked = sum(1 for e in _edges_list if e < config.MIN_EDGES_REQUIRED)
+
+    acol1, acol2, acol3, acol4, acol5 = st.columns(5)
     with acol1:
         st.metric("Analyzed", total_analyses)
     with acol2:
@@ -946,12 +1131,26 @@ if analyses:
         st.metric("SELL Signals", sell_count)
     with acol4:
         st.metric("Selectivity", f"{conversion:.1f}% traded")
+    with acol5:
+        st.metric("Edge-Blocked", _edge_blocked)
 
-    # Conviction distribution
-    fig2 = px.histogram(df_analysis, x="conviction", nbins=10,
-                        title="Conviction Score Distribution",
-                        color_discrete_sequence=["#2196F3"])
-    st.plotly_chart(fig2, use_container_width=True)
+    # Conviction distribution + edge distribution side by side
+    chart_col1, chart_col2 = st.columns(2)
+    with chart_col1:
+        fig2 = px.histogram(df_analysis, x="conviction", nbins=10,
+                            title="Conviction Score Distribution",
+                            color_discrete_sequence=["#2196F3"])
+        fig2.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0))
+        st.plotly_chart(fig2, use_container_width=True)
+    with chart_col2:
+        if _edges_list:
+            fig_edges = px.histogram(x=_edges_list, nbins=4,
+                                     title="Edges Firing Distribution (0-3)",
+                                     color_discrete_sequence=["#FF9800"],
+                                     labels={"x": "Edges Firing", "count": "Count"})
+            fig_edges.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0),
+                                    xaxis=dict(dtick=1))
+            st.plotly_chart(fig_edges, use_container_width=True)
 else:
     st.info("No analyses yet")
 
@@ -961,6 +1160,40 @@ st.divider()
 # BOT CONFIG (read-only)
 # ──────────────────────────────────────────────
 
+# ──────────────────────────────────────────────
+# SCALE-OUT LOG (v2.0)
+# ──────────────────────────────────────────────
+
+with st.expander("Scale-Out History (Partial Exits)"):
+    with db._get_conn() as _conn:
+        _partial_rows = _conn.execute(
+            """SELECT pe.*, t.ticker, t.entry_price, t.action
+               FROM partial_exits pe
+               JOIN trades t ON pe.trade_id = t.id
+               ORDER BY pe.timestamp DESC LIMIT 50"""
+        ).fetchall()
+
+    if _partial_rows:
+        _partial_data = []
+        for r in _partial_rows:
+            rd = dict(r)
+            entry = rd.get("entry_price", 0)
+            exit_p = rd.get("exit_price", 0)
+            _partial_data.append({
+                "Ticker": rd.get("ticker", ""),
+                "Qty Sold": rd.get("quantity", 0),
+                "Entry": f"${entry:,.2f}" if entry else "—",
+                "Exit": f"${exit_p:,.2f}" if exit_p else "—",
+                "P&L": f"${rd.get('pnl', 0):+,.2f}" if rd.get("pnl") else "—",
+                "Reason": rd.get("reason", ""),
+                "Timestamp": rd.get("timestamp", ""),
+            })
+        st.dataframe(pd.DataFrame(_partial_data), use_container_width=True, hide_index=True)
+    else:
+        st.info("No partial exits recorded yet")
+
+st.divider()
+
 with st.expander("Bot Configuration"):
     mode = config.TRADE_MODE.upper()
     mode_emoji = {"SAFE": "🛡️", "NORMAL": "⚖️", "AGGRESSIVE": "🔥"}.get(mode, "⚙️")
@@ -968,6 +1201,7 @@ with st.expander("Bot Configuration"):
     st.markdown("*Change in `.env` → `TRADE_MODE=safe|normal|aggressive` → restart bot*")
     st.markdown("")
 
+    st.markdown("#### Trade Parameters")
     cfgcol1, cfgcol2, cfgcol3, cfgcol4 = st.columns(4)
     with cfgcol1:
         st.markdown(f"**Max Risk/Trade:** {config.MAX_RISK_PER_TRADE*100}%")
@@ -982,6 +1216,33 @@ with st.expander("Bot Configuration"):
         st.markdown(f"**Scanner Depth:** Top {config.SCANNER_TOP_N} candidates")
         st.markdown(f"**Cycle Interval:** {config.RESEARCH_INTERVAL_MINUTES} min")
 
+    st.markdown("#### Risk-First Gate (v2.0)")
+    rcfg1, rcfg2, rcfg3, rcfg4 = st.columns(4)
+    with rcfg1:
+        st.markdown(f"**Kelly Safety:** {config.KELLY_SAFETY_MULTIPLIER}x (half-Kelly)")
+        st.markdown(f"**Drawdown Halt:** {config.MAX_DRAWDOWN_HALT_PCT*100:.0f}%")
+    with rcfg2:
+        st.markdown(f"**Min Edges:** {config.MIN_EDGES_REQUIRED}/3")
+        st.markdown(f"**Volatility ATR:** {config.VOLATILITY_ATR_MULTIPLIER}x")
+    with rcfg3:
+        st.markdown(f"**Trail Activation:** {config.TRAILING_STOP_ACTIVATION_PCT}%")
+        st.markdown(f"**Trail Distance:** {config.TRAILING_STOP_DISTANCE_PCT}% / {config.PENNY_TRAILING_STOP_DISTANCE_PCT}%")
+    with rcfg4:
+        st.markdown(f"**Circuit Breaker:** SPY {config.CIRCUIT_BREAKER_SPY_DROP_PCT}%")
+        st.markdown(f"**Earnings Exit:** {config.EARNINGS_EXIT_DAYS}d ({config.EARNINGS_EXIT_MODE})")
+
+    st.markdown("#### Exit Management")
+    ecfg1, ecfg2, ecfg3 = st.columns(3)
+    with ecfg1:
+        st.markdown(f"**Exit Check:** every {config.EXIT_CHECK_INTERVAL_MINUTES} min")
+        st.markdown(f"**Time Stop:** {config.TIME_STOP_DAYS} days")
+    with ecfg2:
+        st.markdown(f"**Scale-Out:** {'Enabled' if config.SCALE_OUT_ENABLED else 'Disabled'}")
+        st.markdown(f"**Scale Levels:** {', '.join(str(l) + 'R' for l in config.SCALE_OUT_LEVELS)}")
+    with ecfg3:
+        st.markdown(f"**Penny Limit Slip:** {config.PENNY_LIMIT_SLIPPAGE_PCT}%")
+        st.markdown(f"**Max Slippage:** {config.MAX_SLIPPAGE_PCT}%")
+
 # API Request IDs
 with st.expander("Alpaca API Request IDs (debugging)"):
     request_ids = db.get_recent_request_ids(30)
@@ -992,44 +1253,6 @@ with st.expander("Alpaca API Request IDs (debugging)"):
         st.dataframe(df_reqs[available_cols], use_container_width=True)
     else:
         st.info("No API calls logged yet")
-
-# ──────────────────────────────────────────────
-# STRATEGY HEALTH (Phase 5c)
-# ──────────────────────────────────────────────
-
-st.subheader("Strategy Health")
-
-def _show_strategy_health(portfolio_name: str):
-    stats = db.get_strategy_stats(portfolio_name, days=30)
-    baseline = db.get_strategy_stats(portfolio_name, days=90)
-    if stats["trade_count"] < 5:
-        st.info(f"Not enough closed trades for {portfolio_name} portfolio health (need 5+, have {stats['trade_count']})")
-        return
-
-    hcol1, hcol2, hcol3, hcol4, hcol5 = st.columns(5)
-    with hcol1:
-        wr = stats["win_rate"] * 100
-        st.metric(f"{portfolio_name.title()} Win Rate (30d)", f"{wr:.0f}%")
-    with hcol2:
-        st.metric("Expectancy", f"${stats['expectancy']:+,.2f}")
-    with hcol3:
-        pf = stats.get("profit_factor", 0)
-        st.metric("Profit Factor", f"{pf:.2f}" if pf > 0 else "N/A")
-    with hcol4:
-        st.metric("Payoff Ratio", f"{stats['payoff_ratio']:.2f}" if stats["payoff_ratio"] > 0 else "N/A")
-    with hcol5:
-        if baseline["trade_count"] >= 20:
-            delta = (stats["win_rate"] - baseline["win_rate"]) * 100
-            color = "normal" if delta >= 0 else "inverse"
-            st.metric("WR vs 90d Baseline", f"{delta:+.0f}%")
-        else:
-            st.metric("WR vs 90d Baseline", "N/A")
-
-_show_strategy_health("main")
-if config.PENNY_ENABLED:
-    _show_strategy_health("penny")
-
-st.divider()
 
 # Footer
 st.divider()
