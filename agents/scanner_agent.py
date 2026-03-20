@@ -478,3 +478,123 @@ class ScannerAgent:
             f"{len(result)} selected"
         )
         return result
+
+    def scan_penny(self) -> list[str]:
+        """Scan for penny stocks ($1-$5) with high volume and upside potential.
+
+        Uses the same 3-stage funnel as the main scanner but with:
+        - Price filter: $1–$5 (instead of $5–$5,000)
+        - Higher volume threshold: 500K+ avg volume (liquidity matters more)
+        - Bonus scoring for high daily % movers (penny stocks move big)
+        """
+        logger.info("Penny Scanner: Starting sub-$5 scan...")
+
+        penny_min = self.config.PENNY_MIN_PRICE
+        penny_max = self.config.PENNY_MAX_PRICE
+        penny_min_vol = self.config.PENNY_MIN_AVG_VOLUME
+        penny_top_n = self.config.PENNY_SCANNER_TOP_N
+
+        # Stage 1: Load tradeable universe
+        tradeable = self._load_tradeable_assets()
+        all_symbols = list(tradeable)
+
+        # Discovery bonuses (reuse same discovery sources)
+        discovery_candidates = []
+        discovery_candidates.extend(self._discover_most_active())
+        discovery_candidates.extend(self._discover_top_movers())
+
+        source_counts: dict[str, int] = Counter()
+        for c in discovery_candidates:
+            source_counts[c["ticker"]] += 1
+
+        logger.info(f"Penny Stage 1: {len(all_symbols)} tradeable symbols")
+
+        # Stage 2: Batch snapshot — penny price filter
+        snapshots = self.alpaca_data.get_multi_snapshots(all_symbols + ["SPY"])
+
+        passed_filter: list[str] = []
+        for sym in all_symbols:
+            snap = snapshots.get(sym)
+            if not snap:
+                continue
+            price = snap.get("price", 0)
+            volume = snap.get("volume", 0)
+            if penny_min <= price <= penny_max and volume >= penny_min_vol:
+                passed_filter.append(sym)
+
+        logger.info(f"Penny Stage 2: {len(passed_filter)} passed $1-$5 / volume filter")
+
+        if not passed_filter:
+            logger.info("Penny Scanner: No candidates passed filters")
+            return []
+
+        # Stage 3: Score — penny stocks prioritize momentum and volume spikes
+        weekly_bars = self.alpaca_data.get_multi_bars(
+            passed_filter + ["SPY"], "1Week", days=90,
+        )
+        spy_4w = self._calc_return(weekly_bars.get("SPY", []), weeks=4)
+
+        scored = []
+        for ticker in passed_filter:
+            snap = snapshots.get(ticker, {})
+            price = snap.get("price", 0)
+            volume = snap.get("volume", 0)
+            daily_change = snap.get("daily_change_pct", 0)
+
+            wb = weekly_bars.get(ticker, [])
+            ticker_4w_return = self._calc_return(wb, weeks=4)
+            rel_strength = ticker_4w_return - spy_4w
+
+            # Penny stocks: skip rel strength filter (they're volatile)
+
+            weekly_uptrend = self._check_weekly_trend(wb, sma_period=10)
+
+            prev_volume = snap.get("prev_volume", 0)
+            vol_ratio = volume / prev_volume if prev_volume > 0 else 1.0
+
+            # Penny scoring: heavier weight on volume spike + daily momentum
+            score = 0.0
+
+            # Relative strength: 0-20 pts (less weight than main)
+            score += max(0, min(20, (rel_strength + 10) * 1))
+
+            # Weekly uptrend: 0 or 15 pts
+            if weekly_uptrend:
+                score += 15
+
+            # Volume spike: 0-30 pts (key signal for penny stocks)
+            score += max(0, min(30, vol_ratio * 10))
+
+            # Multi-source discovery bonus: 0-10 pts
+            sources = source_counts.get(ticker, 0)
+            score += min(10, sources * 5)
+
+            # Daily momentum: 0-25 pts (penny stocks reward big movers)
+            if daily_change > 0:
+                score += min(25, daily_change * 2.5)
+
+            scored.append({
+                "ticker": ticker,
+                "score": round(score, 1),
+                "rel_strength": round(rel_strength, 2),
+                "weekly_uptrend": weekly_uptrend,
+                "vol_ratio": round(vol_ratio, 2),
+                "daily_change": daily_change,
+                "price": price,
+                "sources": sources,
+            })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+
+        if scored:
+            top5 = ", ".join(f"{s['ticker']}(${s['price']:.2f}, {s['score']})" for s in scored[:5])
+            logger.info(f"Penny Stage 3: {len(scored)} scored | Top 5: {top5}")
+
+        result = [r["ticker"] for r in scored[:penny_top_n]]
+
+        logger.info(
+            f"Penny Scanner complete: {len(all_symbols)} universe → "
+            f"{len(passed_filter)} penny-priced → {len(scored)} scored → "
+            f"{len(result)} selected"
+        )
+        return result
