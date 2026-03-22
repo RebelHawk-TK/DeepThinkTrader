@@ -77,8 +77,10 @@ class Config:
     REDDIT_CLIENT_SECRET: str = _secret("reddit_client_secret", "REDDIT_CLIENT_SECRET")
     REDDIT_USER_AGENT: str = os.getenv("REDDIT_USER_AGENT", "DeepThinkTrader/1.0")
 
-    # Anthropic
+    # Anthropic (Claude AI analysis layer)
     ANTHROPIC_API_KEY: str = _secret("anthropic_api_key", "ANTHROPIC_API_KEY")
+    CLAUDE_ANALYSIS_ENABLED: bool = os.getenv("CLAUDE_ANALYSIS_ENABLED", "true").lower() == "true"
+    CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
     # RapidAPI
     RAPIDAPI_KEY: str = _secret("rapidapi_key", "RAPIDAPI_KEY")

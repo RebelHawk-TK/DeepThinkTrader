@@ -1,0 +1,17 @@
+#!/bin/bash
+# DeepThinkTrader — Stop all processes
+
+DIR="/Users/rebelhawk/Documents/Claude/StockTrader"
+
+osascript << 'APPLEOF'
+tell application "Terminal"
+    set alreadyRunning to (count of windows) > 0
+    do script "bash /Users/rebelhawk/Documents/Claude/StockTrader/stop.sh && exit"
+    delay 2
+    if not alreadyRunning then
+        quit
+    end if
+end tell
+APPLEOF
+
+osascript -e 'display notification "All services stopped" with title "DeepThinkTrader"' 2>/dev/null

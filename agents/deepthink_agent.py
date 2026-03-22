@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from config import Config
+from utils.claude_analyst import ClaudeAnalyst
 from utils.database import Database
 from utils.yahoo_fundamentals import YahooFundamentals
 
@@ -16,6 +17,7 @@ class DeepThinkAgent:
         self.config = Config()
         self.db = db or Database()
         self.yahoo = YahooFundamentals()
+        self.claude = ClaudeAnalyst()
 
     def _score_factors(self, report: dict) -> tuple[list[dict], list[dict]]:
         """Extract and score bullish/bearish factors from research report."""
@@ -484,6 +486,41 @@ class DeepThinkAgent:
             action = "HOLD"
             edge_reason = "Conviction below threshold"
 
+        # Step 8: Claude qualitative analysis — adjusts conviction and can override action
+        claude_analysis = {}
+        if self.claude.enabled:
+            pre_claude_analysis = {
+                "action": action, "conviction": conviction,
+                "bullish_factors": bullish, "bearish_factors": bearish,
+                "edge_details": edge_details,
+            }
+            claude_analysis = self.claude.analyze_trade(report, pre_claude_analysis)
+
+            # Apply conviction adjustment (scaled by Claude's confidence)
+            adj = claude_analysis.get("conviction_adjustment", 0)
+            conf = claude_analysis.get("confidence", 0)
+            scaled_adj = adj * conf  # Low-confidence adjustments have less impact
+            if abs(scaled_adj) > 0.1:
+                conviction = round(max(1, min(10, conviction + scaled_adj)), 1)
+                logger.info(
+                    f"Claude adjusted conviction for {ticker}: {scaled_adj:+.1f} "
+                    f"(raw={adj:+.1f}, confidence={conf:.0%}) → {conviction}"
+                )
+
+            # Action override — only if Claude is highly confident
+            override = claude_analysis.get("action_override")
+            if override and conf >= 0.8 and override != action:
+                logger.warning(
+                    f"CLAUDE OVERRIDE for {ticker}: {action} → {override} "
+                    f"(confidence={conf:.0%}): {claude_analysis.get('qualitative_assessment', '')}"
+                )
+                action = override
+
+            # Re-check decision after conviction adjustment
+            if action != "HOLD" and conviction < min_conv:
+                action = "HOLD"
+                edge_reason = f"Conviction dropped below threshold after Claude analysis ({conviction})"
+
         # Build reasoning summary
         top_bull = sorted(bullish, key=lambda x: x["strength"], reverse=True)[:2]
         top_bear = sorted(bearish, key=lambda x: x["strength"], reverse=True)[:2]
@@ -491,12 +528,15 @@ class DeepThinkAgent:
             f"{e['label']}: {'PASS' if e['passed'] else 'FAIL'} ({', '.join(e['details'][:2])})"
             for e in edge_details
         )
+        claude_note = ""
+        if claude_analysis.get("qualitative_assessment"):
+            claude_note = f" Claude: {claude_analysis['qualitative_assessment']}"
         reasoning = (
             f"Top bullish: {', '.join(f['factor'] for f in top_bull)}. "
             f"Top bearish: {', '.join(f['factor'] for f in top_bear)}. "
             f"Combined catalyst: {catalyst:.3f}. "
             f"Edges: {edge_summary}. "
-            f"{edge_reason}."
+            f"{edge_reason}.{claude_note}"
         )
 
         analysis = {
@@ -518,6 +558,7 @@ class DeepThinkAgent:
                 {"label": e["label"], "passed": e["passed"], "strength": e["strength"], "details": e["details"]}
                 for e in edge_details
             ],
+            "claude_analysis": claude_analysis if claude_analysis else None,
         }
 
         self.db.save_analysis(analysis, portfolio=portfolio)
