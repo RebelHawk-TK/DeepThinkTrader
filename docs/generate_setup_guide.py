@@ -1,4 +1,4 @@
-"""Generate PDF setup guide for DeepThinkTrader v2.0 API keys and trading parameters."""
+"""Generate PDF setup guide for DeepThinkTrader v3.0 API keys and trading parameters."""
 
 from datetime import datetime
 
@@ -29,8 +29,8 @@ def generate_html() -> str:
 </head>
 <body>
 
-<h1>DeepThinkTrader v2.0 Setup Guide</h1>
-<p><strong>Version:</strong> 2.0 (Risk-First Framework) &nbsp;|&nbsp; <strong>Generated:</strong> {datetime.now().strftime('%B %d, %Y')}</p>
+<h1>DeepThinkTrader v3.0 Setup Guide</h1>
+<p><strong>Version:</strong> 3.0 (Execution Intelligence) &nbsp;|&nbsp; <strong>Generated:</strong> {datetime.now().strftime('%B %d, %Y')}</p>
 
 <div class="danger">
 <strong>CRITICAL WARNING:</strong> Start with paper trading ONLY. Never use real money until you have backtested for 3+ months.
@@ -103,17 +103,29 @@ Trading bots can lose 100% of capital. This project is educational and experimen
 <tr><td>Max Positions</td><td>5</td><td>10</td><td>15</td></tr>
 </table>
 
-<h3>2.2 Risk-First Parameters (v2.0)</h3>
+<h3>2.2 Risk-First Parameters</h3>
 <table>
 <tr><th>Parameter</th><th>Variable</th><th>Default</th><th>Description</th></tr>
 <tr><td>Kelly Safety</td><td><code>KELLY_SAFETY_MULTIPLIER</code></td><td>0.5</td><td>Half-Kelly for conservative sizing</td></tr>
 <tr><td>Drawdown Halt</td><td><code>MAX_DRAWDOWN_HALT_PCT</code></td><td>0.08 (8%)</td><td>Block all entries if drawdown exceeds this</td></tr>
-<tr><td>Volatility Mult</td><td><code>VOLATILITY_ATR_MULTIPLIER</code></td><td>3.0</td><td>Cut risk 50% if ATR > 3x median</td></tr>
+<tr><td>Volatility Mult</td><td><code>VOLATILITY_ATR_MULTIPLIER</code></td><td>3.0</td><td>Cut risk 50% if ATR > 3x median (real 30-day)</td></tr>
 <tr><td>Min ADV Ratio</td><td><code>MIN_ADV_RATIO</code></td><td>5</td><td>Shares must be &lt; ADV/5</td></tr>
 <tr><td>Max Risk of Ruin</td><td><code>MAX_RISK_OF_RUIN_PCT</code></td><td>0.01 (1%)</td><td>Block if RoR exceeds 1%</td></tr>
 <tr><td>Min Edges</td><td><code>MIN_EDGES_REQUIRED</code></td><td>2</td><td>Require 2/3 edges (Fund+Tech+Sent)</td></tr>
-<tr><td>Circuit Breaker</td><td><code>CIRCUIT_BREAKER_SPY_DROP_PCT</code></td><td>-2.0</td><td>Block longs if SPY down > 2%</td></tr>
-<tr><td>Earnings Exit</td><td><code>EARNINGS_EXIT_DAYS</code></td><td>2</td><td>Auto-close within 2 days of earnings</td></tr>
+<tr><td>SPY Circuit Breaker</td><td><code>CIRCUIT_BREAKER_SPY_DROP_PCT</code></td><td>-2.0</td><td>Block longs if SPY down > 2%</td></tr>
+<tr><td>VIX Circuit Breaker</td><td><code>CIRCUIT_BREAKER_VIX_THRESHOLD</code></td><td>30</td><td>Block ALL entries when VIX &ge; 30</td></tr>
+<tr><td>Earnings Exit</td><td><code>EARNINGS_EXIT_DAYS</code></td><td>2</td><td>Auto-close within 2 days / 12 hours of earnings</td></tr>
+</table>
+
+<h3>2.3 Execution Quality Parameters (v3.0)</h3>
+<table>
+<tr><th>Parameter</th><th>Variable</th><th>Default</th><th>Description</th></tr>
+<tr><td>Max Spread</td><td><code>MAX_SPREAD_PCT</code></td><td>1.0%</td><td>Block market orders with wide spreads</td></tr>
+<tr><td>Penny Max Spread</td><td><code>PENNY_MAX_SPREAD_PCT</code></td><td>2.0%</td><td>Higher spread tolerance for penny stocks</td></tr>
+<tr><td>Sector Limit</td><td><code>MAX_SECTOR_EXPOSURE_PCT</code></td><td>25%</td><td>Max portfolio % per GICS sector</td></tr>
+<tr><td>Gap Risk ATR</td><td><code>GAP_RISK_ATR_THRESHOLD</code></td><td>5.0%</td><td>ATR% triggering gap risk reduction</td></tr>
+<tr><td>Gap Reduction</td><td><code>GAP_RISK_POSITION_REDUCTION</code></td><td>50%</td><td>Position size multiplier for high gap risk</td></tr>
+<tr><td>Obsidian Vault</td><td><code>OBSIDIAN_VAULT_PATH</code></td><td>~/Documents/RHVault/RHVault</td><td>Path to Obsidian vault for SA emails</td></tr>
 </table>
 
 <h3>2.3 Exit Management Parameters</h3>
@@ -130,7 +142,7 @@ Trading bots can lose 100% of capital. This project is educational and experimen
 
 <div class="page-break"></div>
 
-<h2>3. Risk Management (13 Pre-Trade Checks)</h2>
+<h2>3. Risk Management (15 Pre-Trade Checks)</h2>
 
 <div class="info">
 These safety checks run BEFORE every trade and cannot be overridden via configuration.
@@ -149,8 +161,10 @@ These safety checks run BEFORE every trade and cannot be overridden via configur
 <tr><td>9</td><td>Risk of ruin &lt; 1%</td><td>BLOCKED</td></tr>
 <tr><td>10</td><td>Liquidity: shares &lt; ADV/5</td><td>Auto-reduce or BLOCKED</td></tr>
 <tr><td>11</td><td>Multi-edge: 2/3 edges firing</td><td>HOLD</td></tr>
-<tr><td>12</td><td>Market health: SPY not down &gt; 2%</td><td>BLOCKED (longs only)</td></tr>
-<tr><td>13</td><td>No earnings within 2 days</td><td>Auto-close or BLOCKED</td></tr>
+<tr><td>12</td><td>Market health: SPY &gt; 2% OR VIX &ge; 30</td><td>BLOCKED (SPY=longs, VIX=all)</td></tr>
+<tr><td>13</td><td>No earnings within 2 days / 12 hours</td><td>Auto-close or BLOCKED</td></tr>
+<tr><td>14</td><td>Bid-ask spread acceptable</td><td>BLOCKED</td></tr>
+<tr><td>15</td><td>Sector concentration &lt; 25%</td><td>BLOCKED</td></tr>
 </table>
 
 <h2>4. Quick Setup Checklist</h2>
@@ -203,7 +217,7 @@ PENNY_ENABLED=true
 </pre>
 
 <div class="footer">
-<p><strong>DeepThinkTrader v2.0</strong> &mdash; Risk-First Framework &mdash; Paper Trading Mode Only</p>
+<p><strong>DeepThinkTrader v3.0</strong> &mdash; Execution Intelligence &mdash; Paper Trading Mode Only</p>
 <p>Generated {datetime.now().strftime('%B %d, %Y')} | For educational/experimental use only</p>
 </div>
 

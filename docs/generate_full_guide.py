@@ -1,4 +1,4 @@
-"""Generate comprehensive PDF guide for DeepThinkTrader v2.0."""
+"""Generate comprehensive PDF guide for DeepThinkTrader v3.0."""
 
 from datetime import datetime
 
@@ -31,7 +31,7 @@ def generate_html() -> str:
 </head>
 <body>
 
-<h1>DeepThinkTrader v2.0 — Complete System Guide</h1>
+<h1>DeepThinkTrader v3.0 — Complete System Guide</h1>
 <p><strong>Generated:</strong> {datetime.now().strftime('%B %d, %Y')} &nbsp;|&nbsp; <strong>Repository:</strong> github.com/RebelHawk-TK/DeepThinkTrader</p>
 
 <div class="danger">
@@ -42,18 +42,18 @@ Trading bots can lose 100% of capital. This project is educational and experimen
 <h2>1. Architecture Overview</h2>
 
 <div class="info">
-<strong>Pipeline:</strong> Scanner &rarr; Research Agent &rarr; DeepThink Analysis (Rule-Based + Multi-Edge) &rarr; Risk Gate (13 checks) &rarr; Execution Agent &rarr; Alpaca Paper Trading
+<strong>Pipeline:</strong> Scanner (RSI-scored) &rarr; Research Agent (+ Obsidian SA) &rarr; DeepThink Analysis (Rule-Based + Multi-Edge + Edge Learning) &rarr; Risk Gate (15 checks) &rarr; Execution Agent (spread/VIX/sector/gap guards) &rarr; Alpaca Paper Trading
 </div>
 
 <table>
 <tr><th>Component</th><th>Technology</th><th>Purpose</th></tr>
-<tr><td>Scanner Agent</td><td>Alpaca Screener API</td><td>3-stage funnel: discovery, pre-screen, scoring — main + penny ($1-$5)</td></tr>
-<tr><td>Research Agent</td><td>Alpaca + Twelve Data + NewsAPI + Yahoo Finance</td><td>Gathers technicals, fundamentals, news sentiment, analyst ratings, insider trades, earnings data</td></tr>
-<tr><td>DeepThink Agent</td><td>Rule-based scoring + multi-edge validation</td><td>Conviction scoring, scenario modeling, 3-edge confirmation (Fund/Tech/Sentiment)</td></tr>
-<tr><td>Risk Manager</td><td>Kelly criterion + portfolio guards</td><td>13 pre-trade checks: Kelly sizing, drawdown halt, circuit breaker, liquidity, earnings</td></tr>
-<tr><td>Execution Agent</td><td>Alpaca Paper Trading API</td><td>Market/limit orders, trailing stops, partial scale-out, time stops, slippage tracking</td></tr>
+<tr><td>Scanner Agent</td><td>Alpaca Screener API + RSI</td><td>3-stage funnel with RSI momentum scoring — main + penny ($1-$5)</td></tr>
+<tr><td>Research Agent</td><td>Alpaca + Twelve Data + NewsAPI + Yahoo + Obsidian SA</td><td>Gathers technicals, fundamentals, news, Reddit, Seeking Alpha email intelligence</td></tr>
+<tr><td>DeepThink Agent</td><td>Rule-based + edge learning + sector rotation</td><td>Conviction scoring with historical edge combo win rates, sector trend awareness</td></tr>
+<tr><td>Risk Manager</td><td>Kelly criterion + 15 portfolio guards</td><td>Spread, VIX, sector concentration, gap risk, earnings hours, plus original 13 checks</td></tr>
+<tr><td>Execution Agent</td><td>Alpaca Paper Trading API</td><td>Market/limit orders, order polling, partial fill retry, slippage analytics, momentum exits</td></tr>
 <tr><td>Dashboard</td><td>Streamlit + Plotly</td><td>Real-time portfolio monitoring, trade history, strategy health</td></tr>
-<tr><td>Database</td><td>SQLite</td><td>Trade logging, research reports, trailing stops, partial exits, API request IDs</td></tr>
+<tr><td>Database</td><td>SQLite</td><td>Trades, ATR history, slippage records, edge performance, partial exits, request IDs</td></tr>
 </table>
 
 <h2>2. Data Sources</h2>
@@ -65,15 +65,17 @@ Trading bots can lose 100% of capital. This project is educational and experimen
 <tr><td>NewsAPI</td><td>News headlines + VADER sentiment scoring</td><td>Yes</td><td>500 req/day</td></tr>
 <tr><td>Yahoo Finance</td><td>P/E, ROE, growth, debt/equity, earnings dates, insider trades, institutional holdings</td><td>No</td><td>Unlimited</td></tr>
 <tr><td>Reddit (PRAW)</td><td>Sentiment from r/wallstreetbets, r/stocks, r/investing, r/pennystocks</td><td>Yes (optional)</td><td>60 req/min</td></tr>
+<tr><td>Obsidian Vault</td><td>Seeking Alpha newsletter emails — ticker mentions, sentiment, categories</td><td>No (local files)</td><td>N/A</td></tr>
 </table>
 
 <div class="page-break"></div>
 
-<h2>3. Risk-First Framework (v2.0)</h2>
+<h2>3. Risk-First Framework (v3.0)</h2>
 
 <div class="success">
 <strong>Philosophy:</strong> Every trade must pass through a rigorous, emotion-proof checklist before execution.
-No trade executes on conviction alone &mdash; it requires multi-edge confirmation and portfolio-level safety.
+No trade executes on conviction alone &mdash; it requires multi-edge confirmation, portfolio-level safety,
+and execution quality validation (spread, VIX, sector, gap risk).
 </div>
 
 <h3>3.1 Position Sizing: Fractional Kelly</h3>
@@ -84,7 +86,7 @@ No trade executes on conviction alone &mdash; it requires multi-edge confirmatio
 </table>
 <p>Where p = win rate, q = 1 - p, b = avg win / avg loss (payoff ratio). Capped at MAX_POSITION_PCT.</p>
 
-<h3>3.2 Pre-Trade Checks (13 gates)</h3>
+<h3>3.2 Pre-Trade Checks (15 gates)</h3>
 <table>
 <tr><th>#</th><th>Check</th><th>Action if Failed</th></tr>
 <tr><td>1</td><td>Conviction meets threshold</td><td>HOLD</td></tr>
@@ -98,12 +100,18 @@ No trade executes on conviction alone &mdash; it requires multi-edge confirmatio
 <tr><td>9</td><td>Risk of ruin &lt; 1%</td><td>BLOCKED</td></tr>
 <tr><td>10</td><td>Liquidity: shares &lt; ADV/5</td><td>Auto-reduce or BLOCKED</td></tr>
 <tr><td>11</td><td>Multi-edge: 2/3 edges firing</td><td>HOLD</td></tr>
-<tr><td>12</td><td>Market health: SPY not down &gt; 2%</td><td>BLOCKED (longs only)</td></tr>
-<tr><td>13</td><td>No earnings within 2 days</td><td>Auto-close or BLOCKED</td></tr>
+<tr><td>12</td><td>Market health: SPY down &gt; 2% OR VIX &ge; 30</td><td>BLOCKED (SPY=longs, VIX=all)</td></tr>
+<tr><td>13</td><td>No earnings within 2 days / &lt; 12 hours</td><td>Auto-close or BLOCKED</td></tr>
+<tr><td>14</td><td>Bid-ask spread acceptable (&lt; 1% main, &lt; 2% penny)</td><td>BLOCKED</td></tr>
+<tr><td>15</td><td>Sector concentration &lt; 25% of portfolio</td><td>BLOCKED</td></tr>
 </table>
 
 <h3>3.3 Volatility Adjustment</h3>
-<p>If current ATR &gt; 3&times; median ATR (50-day), risk percentage is automatically cut in half.</p>
+<p>If current ATR &gt; 3&times; median ATR (real 30-day median from stored history), risk is cut in half.</p>
+
+<h3>3.4 Overnight Gap Risk (v3.0)</h3>
+<p>Position size is automatically reduced for high-gap-risk names based on ATR/price %, beta, and earnings proximity.
+High risk (score &ge; 2) = 50% reduction, moderate (score &ge; 1) = 75%.</p>
 
 <h3>3.4 Revenge Trading Detector</h3>
 <p>If last 3 trades are all losses, all new entries are blocked until a winning trade occurs.</p>
@@ -172,8 +180,14 @@ No trade executes on conviction alone &mdash; it requires multi-edge confirmatio
 <h3>5.4 Time Stop</h3>
 <p>If a position shows &lt; 2% movement after 15 trading days, it is automatically closed to free capital.</p>
 
-<h3>5.5 Earnings Auto-Exit</h3>
-<p>If earnings are within 2 trading days, position is automatically closed (configurable: close or tighten SL 50%).</p>
+<h3>5.5 Earnings Auto-Exit (v3.0)</h3>
+<p>If earnings are within 2 trading days OR &lt; 12 hours away (imminent flag), position is automatically closed.
+Pre-market earnings at 7am are now caught even if checked at 3pm the day before.</p>
+
+<h3>5.6 Momentum Divergence Exit (v3.0)</h3>
+<p>On every exit check, profitable positions are checked for RSI divergence:
+RSI &gt; 75 on a long = tighten stop to 50% distance. Weak volume + overbought = same tightening.
+This locks in profits before momentum fades.</p>
 
 <div class="page-break"></div>
 
@@ -198,16 +212,17 @@ BUY 120 shares of XYZ @ $4.50
   Portfolio: penny | ADV: 500,000
 </pre>
 
-<h2>7. Market Circuit Breaker</h2>
+<h2>7. Market Circuit Breaker (v3.0)</h2>
 
 <table>
 <tr><th>Trigger</th><th>Action</th></tr>
 <tr><td>SPY down &gt; 2% intraday</td><td>Block all new LONG entries (shorts still OK)</td></tr>
+<tr><td>VIX &ge; 30</td><td>Block ALL new entries (extreme fear regime)</td></tr>
 <tr><td>30-day drawdown &gt; 8%</td><td>Block ALL new entries (not exits)</td></tr>
 <tr><td>Negative expectancy</td><td>Block trades (risk of ruin too high)</td></tr>
 </table>
 
-<h2>8. Post-Trade Learning (v2.0)</h2>
+<h2>8. Post-Trade Learning & Intelligence (v3.0)</h2>
 
 <h3>8.1 Strategy Health Metrics</h3>
 <table>
@@ -225,6 +240,30 @@ As strategy performs better, Kelly sizes up. As it degrades, sizing shrinks auto
 
 <h3>8.3 Weekly Health Check (Monday)</h3>
 <p>If 30-day win rate drops &gt; 15% from 90-day baseline, a degradation warning is logged.</p>
+
+<h3>8.4 Slippage Analytics (v3.0)</h3>
+<p>Every fill is recorded with expected vs actual price, order type, and hour of day.
+Aggregated by ticker and time to identify costly patterns. Before trading, the system warns if a
+ticker historically has &gt; 0.5% average slippage.</p>
+
+<h3>8.5 Edge Combo Learning (v3.0)</h3>
+<p>When trades close, the edge combination used (F=Fundamental, T=Technical, S=Sentiment)
+is recorded with the P&amp;L outcome. Over time, combos with &gt; 65% win rate get +1.5 conviction
+boost, while combos &lt; 35% get -1.5 penalty. This creates a self-improving feedback loop.</p>
+
+<h3>8.6 Sector Rotation Awareness (v3.0)</h3>
+<p>Before entry, the system checks if the stock's GICS sector ETF (XLK, XLV, XLF, etc.) is
+above its 50-day SMA. Weak sectors get a -0.5 conviction penalty and a bearish factor.
+This prevents buying strong stocks in weak sectors.</p>
+
+<h3>8.7 Obsidian / Seeking Alpha Integration (v3.0)</h3>
+<p>The system reads Seeking Alpha newsletter emails from an Obsidian vault, extracting:</p>
+<table>
+<tr><th>Data Point</th><th>How Used</th></tr>
+<tr><td>Ticker mentions</td><td>Boost catalyst score for mentioned tickers</td></tr>
+<tr><td>Sentiment</td><td>VADER scoring on context around each ticker</td></tr>
+<tr><td>Categories (earnings, insider, analyst, etc.)</td><td>Feed into risk/opportunity signals</td></tr>
+</table>
 
 <div class="page-break"></div>
 
@@ -269,8 +308,20 @@ MAX_SLIPPAGE_PCT=0.3
 
 # Market Awareness
 CIRCUIT_BREAKER_SPY_DROP_PCT=-2.0
+CIRCUIT_BREAKER_VIX_THRESHOLD=30.0
 EARNINGS_EXIT_DAYS=2
 EARNINGS_EXIT_MODE=close          # or "tighten"
+
+# Execution Quality (v3.0)
+MAX_SPREAD_PCT=1.0               # Block if bid-ask spread > 1%
+PENNY_MAX_SPREAD_PCT=2.0
+MAX_SECTOR_EXPOSURE_PCT=0.25     # 25% max per GICS sector
+GAP_RISK_ATR_THRESHOLD=5.0      # ATR% > 5 = high gap risk
+GAP_RISK_POSITION_REDUCTION=0.5  # Cut position 50% for high gap risk
+
+# Obsidian Integration (v3.0)
+OBSIDIAN_VAULT_PATH=~/Documents/RHVault/RHVault
+OBSIDIAN_SA_MAX_AGE_DAYS=7
 </pre>
 
 <h2>10. Quick Start</h2>
@@ -303,8 +354,10 @@ StockTrader/
 │   └── scanner_agent.py       # 3-stage discovery (main + penny)
 ├── utils/
 │   ├── alpaca_data.py         # Alpaca market data + X-Request-ID
-│   ├── database.py            # SQLite (trades, trailing stops, partial exits)
-│   ├── risk_manager.py        # Kelly sizing + 13 pre-trade checks
+│   ├── database.py            # SQLite (trades, ATR history, slippage, edge perf)
+│   ├── market_clock.py        # Alpaca market clock API + timezone handling
+│   ├── obsidian_seeking_alpha.py  # Seeking Alpha email parser from Obsidian vault
+│   ├── risk_manager.py        # Kelly sizing + 15 pre-trade checks + sector rotation
 │   ├── twelve_data.py         # MACD, Bollinger, EMA, Stochastic, ADX, ATR
 │   └── yahoo_fundamentals.py  # Fundamentals, earnings calendar, edge scoring
 ├── .env.template              # API key template
@@ -313,8 +366,8 @@ StockTrader/
 </pre>
 
 <div class="footer">
-<p><strong>DeepThinkTrader v2.0</strong> &mdash; Risk-First Framework &mdash; Paper Trading Mode Only &mdash; github.com/RebelHawk-TK/DeepThinkTrader</p>
-<p>Generated {datetime.now().strftime('%B %d, %Y')} | For educational/experimental use only</p>
+<p><strong>DeepThinkTrader v3.0</strong> &mdash; Execution Intelligence + Self-Improving Learning Loop &mdash; Paper Trading Mode Only</p>
+<p>Generated {datetime.now().strftime('%B %d, %Y')} | github.com/RebelHawk-TK/DeepThinkTrader | For educational/experimental use only</p>
 </div>
 
 </body>
