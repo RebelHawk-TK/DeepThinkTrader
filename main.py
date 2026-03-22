@@ -15,6 +15,7 @@ from agents.research_agent import ResearchAgent
 from agents.scanner_agent import ScannerAgent
 from config import Config
 from utils.database import Database
+from utils.market_clock import get_market_clock
 
 # Configure logging
 logging.basicConfig(
@@ -37,6 +38,7 @@ class DeepThinkTrader:
         logger.info("Using rule-based DeepThink analysis")
         self.execution = ExecutionAgent(self.db)
         self.scanner = ScannerAgent(self.db)
+        self.clock = get_market_clock()
         self._last_scan_date: str = ""
 
     def _run_scan(self) -> list[str]:
@@ -157,12 +159,8 @@ class DeepThinkTrader:
         return results[0] if results else {"status": "ERROR", "message": "No result"}
 
     def _is_market_hours(self) -> bool:
-        """Check if US market is currently open."""
-        now = datetime.now()
-        if now.weekday() > 4:
-            return False
-        market_minutes = now.hour * 60 + now.minute
-        return 9 * 60 + 30 <= market_minutes < 16 * 60
+        """Check if US market is currently open via Alpaca clock API."""
+        return self.clock.is_market_open()
 
     def _check_exits_only(self) -> None:
         """Phase 2a: Fast exit check — only price checks on open positions.
@@ -199,6 +197,7 @@ class DeepThinkTrader:
 
     def _guarded_cycle(self) -> None:
         """Only run analysis cycle during market hours."""
+        self.clock.log_status()
         if not self._is_market_hours():
             logger.info("Market closed — skipping cycle, will retry at next interval")
             return

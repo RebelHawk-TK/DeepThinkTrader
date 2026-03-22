@@ -82,6 +82,9 @@ class Database:
             # Run additional migrations
             self._migrate_trailing_stops(conn)
             self._init_partial_exits_table(conn)
+            self._init_atr_history_table(conn)
+            self._init_slippage_table(conn)
+            self._init_edge_performance_table(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS alpaca_request_ids (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,6 +118,7 @@ class Database:
             "edges_fired": "INTEGER",
             "edge_details": "TEXT",
             "risk_amount": "REAL",
+            "sector": "TEXT",
         }
         for col, col_type in migrations.items():
             if col not in cols:
@@ -135,6 +139,225 @@ class Database:
                 FOREIGN KEY (trade_id) REFERENCES trades(id)
             )
         """)
+
+    def _init_atr_history_table(self, conn: sqlite3.Connection) -> None:
+        """Create atr_history table for true median ATR calculation."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS atr_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                date TEXT NOT NULL,
+                atr_value REAL NOT NULL,
+                UNIQUE(ticker, date)
+            )
+        """)
+
+    def save_atr(self, ticker: str, atr_value: float) -> None:
+        """Store daily ATR value for a ticker."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO atr_history (ticker, date, atr_value)
+                   VALUES (?, ?, ?)""",
+                (ticker, today, atr_value),
+            )
+
+    def get_median_atr(self, ticker: str, days: int = 30) -> float:
+        """Get median ATR from stored history. Returns 0 if insufficient data."""
+        with self._get_conn() as conn:
+            from datetime import timedelta
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            rows = conn.execute(
+                """SELECT atr_value FROM atr_history
+                   WHERE ticker = ? AND date >= ?
+                   ORDER BY date""",
+                (ticker, cutoff),
+            ).fetchall()
+        if len(rows) < 5:
+            return 0.0
+        values = sorted(r["atr_value"] for r in rows)
+        mid = len(values) // 2
+        if len(values) % 2 == 0:
+            return (values[mid - 1] + values[mid]) / 2
+        return values[mid]
+
+    def _init_slippage_table(self, conn: sqlite3.Connection) -> None:
+        """Create slippage_records table for tracking fill quality."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS slippage_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                expected_price REAL NOT NULL,
+                filled_price REAL NOT NULL,
+                slippage_pct REAL NOT NULL,
+                order_type TEXT NOT NULL,
+                side TEXT NOT NULL,
+                shares INTEGER,
+                hour_of_day INTEGER,
+                portfolio TEXT DEFAULT 'main'
+            )
+        """)
+
+    def _init_edge_performance_table(self, conn: sqlite3.Connection) -> None:
+        """Create edge_performance table for tracking which edge combos win."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS edge_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER NOT NULL,
+                ticker TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                edge_combo TEXT NOT NULL,
+                edges_fired INTEGER NOT NULL,
+                fund_passed INTEGER,
+                tech_passed INTEGER,
+                sent_passed INTEGER,
+                conviction REAL,
+                pnl REAL,
+                won INTEGER,
+                portfolio TEXT DEFAULT 'main',
+                FOREIGN KEY (trade_id) REFERENCES trades(id)
+            )
+        """)
+
+    # ── Phase 8a: Slippage Analytics ───────────────────────────
+
+    def save_slippage(
+        self, ticker: str, expected_price: float, filled_price: float,
+        order_type: str, side: str, shares: int, portfolio: str = "main",
+    ) -> None:
+        """Record slippage for every filled order."""
+        if expected_price <= 0 or filled_price <= 0:
+            return
+        slippage_pct = ((filled_price - expected_price) / expected_price) * 100
+        hour = datetime.now().hour
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO slippage_records
+                   (ticker, timestamp, expected_price, filled_price, slippage_pct,
+                    order_type, side, shares, hour_of_day, portfolio)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (ticker, datetime.now().isoformat(), expected_price, filled_price,
+                 round(slippage_pct, 4), order_type, side, shares, hour, portfolio),
+            )
+
+    def get_slippage_analytics(self, days: int = 30) -> dict:
+        """Aggregate slippage data for reporting and warnings.
+
+        Returns by-ticker and by-hour breakdowns.
+        """
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        with self._get_conn() as conn:
+            # By ticker: avg slippage, total cost
+            ticker_rows = conn.execute(
+                """SELECT ticker,
+                          COUNT(*) as count,
+                          AVG(slippage_pct) as avg_slippage,
+                          SUM(ABS(slippage_pct) * shares * expected_price / 100) as total_cost
+                   FROM slippage_records
+                   WHERE timestamp >= ?
+                   GROUP BY ticker
+                   ORDER BY avg_slippage DESC""",
+                (cutoff,),
+            ).fetchall()
+
+            # By hour of day
+            hour_rows = conn.execute(
+                """SELECT hour_of_day,
+                          COUNT(*) as count,
+                          AVG(slippage_pct) as avg_slippage
+                   FROM slippage_records
+                   WHERE timestamp >= ?
+                   GROUP BY hour_of_day
+                   ORDER BY hour_of_day""",
+                (cutoff,),
+            ).fetchall()
+
+            # Overall
+            overall = conn.execute(
+                """SELECT COUNT(*) as count,
+                          AVG(slippage_pct) as avg_slippage,
+                          MAX(slippage_pct) as worst_slippage,
+                          SUM(ABS(slippage_pct) * shares * expected_price / 100) as total_cost
+                   FROM slippage_records WHERE timestamp >= ?""",
+                (cutoff,),
+            ).fetchone()
+
+        return {
+            "by_ticker": [dict(r) for r in ticker_rows],
+            "by_hour": [dict(r) for r in hour_rows],
+            "overall": dict(overall) if overall else {},
+        }
+
+    def get_ticker_slippage_avg(self, ticker: str, days: int = 30) -> float:
+        """Get average slippage for a specific ticker. Used to warn before trading."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT AVG(slippage_pct) as avg_slip
+                   FROM slippage_records
+                   WHERE ticker = ? AND timestamp >= ?""",
+                (ticker, cutoff),
+            ).fetchone()
+        return float(row["avg_slip"]) if row and row["avg_slip"] is not None else 0.0
+
+    # ── Phase 8b: Edge Performance Tracking ────────────────────
+
+    def save_edge_performance(
+        self, trade_id: int, ticker: str, edge_combo: str, edges_fired: int,
+        fund_passed: bool, tech_passed: bool, sent_passed: bool,
+        conviction: float, pnl: float, portfolio: str = "main",
+    ) -> None:
+        """Record edge combo and outcome when a trade closes."""
+        with self._get_conn() as conn:
+            conn.execute(
+                """INSERT INTO edge_performance
+                   (trade_id, ticker, timestamp, edge_combo, edges_fired,
+                    fund_passed, tech_passed, sent_passed, conviction, pnl, won, portfolio)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (trade_id, ticker, datetime.now().isoformat(), edge_combo, edges_fired,
+                 1 if fund_passed else 0, 1 if tech_passed else 0,
+                 1 if sent_passed else 0, conviction, pnl, 1 if pnl > 0 else 0, portfolio),
+            )
+
+    def get_edge_combo_stats(self, min_trades: int = 5, days: int = 90) -> list[dict]:
+        """Get win rate and avg P&L by edge combo. Used to boost/penalize conviction."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT edge_combo,
+                          COUNT(*) as trade_count,
+                          SUM(won) as wins,
+                          AVG(pnl) as avg_pnl,
+                          SUM(pnl) as total_pnl,
+                          ROUND(CAST(SUM(won) AS REAL) / COUNT(*) * 100, 1) as win_rate_pct
+                   FROM edge_performance
+                   WHERE timestamp >= ?
+                   GROUP BY edge_combo
+                   HAVING COUNT(*) >= ?
+                   ORDER BY win_rate_pct DESC""",
+                (cutoff, min_trades),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_edge_combo_win_rate(self, edge_combo: str, days: int = 90) -> float | None:
+        """Get win rate for a specific edge combo. Returns None if insufficient data."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """SELECT COUNT(*) as n, SUM(won) as w
+                   FROM edge_performance
+                   WHERE edge_combo = ? AND timestamp >= ?""",
+                (edge_combo, cutoff),
+            ).fetchone()
+        if row and row["n"] >= 5:
+            return row["w"] / row["n"]
+        return None
 
     def save_research(self, ticker: str, report: dict, portfolio: str = "main") -> int:
         with self._get_conn() as conn:
@@ -337,6 +560,41 @@ class Database:
                    exit_timestamp = ?, pnl = ?, exit_reason = ? WHERE id = ?""",
                 (exit_price, datetime.now().isoformat(), pnl, exit_reason, trade_id),
             )
+
+            # Phase 8b: Record edge performance for learning
+            trade = conn.execute(
+                "SELECT * FROM trades WHERE id = ?", (trade_id,)
+            ).fetchone()
+            if trade:
+                edge_details_raw = trade["edge_details"] or "[]"
+                try:
+                    edges = json.loads(edge_details_raw)
+                    fund = any(e.get("label") == "Fundamental" and e.get("passed") for e in edges)
+                    tech = any(e.get("label") == "Technical" and e.get("passed") for e in edges)
+                    sent = any(e.get("label") == "Sentiment" and e.get("passed") for e in edges)
+                    combo_parts = []
+                    if fund:
+                        combo_parts.append("F")
+                    if tech:
+                        combo_parts.append("T")
+                    if sent:
+                        combo_parts.append("S")
+                    edge_combo = "+".join(combo_parts) if combo_parts else "none"
+
+                    self.save_edge_performance(
+                        trade_id=trade_id,
+                        ticker=trade["ticker"],
+                        edge_combo=edge_combo,
+                        edges_fired=trade["edges_fired"] or 0,
+                        fund_passed=fund,
+                        tech_passed=tech,
+                        sent_passed=sent,
+                        conviction=trade["conviction"] or 0,
+                        pnl=pnl,
+                        portfolio=trade["portfolio"] or "main",
+                    )
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
     def get_strategy_stats(self, portfolio: str = "main", days: int = 90) -> dict:
         """Compute win rate and payoff ratio from closed trades for Kelly sizing."""

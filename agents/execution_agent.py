@@ -103,6 +103,72 @@ class ExecutionAgent:
             logger.debug(f"SPY snapshot failed: {e}")
         return 0.0
 
+    # ── Phase 6a: Bid-Ask Spread Check ──────────────────────────
+
+    def _get_spread_pct(self, ticker: str) -> float:
+        """Fetch current bid-ask spread as percentage of mid price.
+
+        Wide spreads cause hidden slippage on market orders.
+        Returns 0.0 if quote unavailable.
+        """
+        try:
+            resp = self._session.get(
+                f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot",
+                headers={
+                    "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
+                    "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                },
+            )
+            if resp.ok:
+                data = resp.json()
+                quote = data.get("latestQuote", {})
+                bid = quote.get("bp", 0)
+                ask = quote.get("ap", 0)
+                if bid > 0 and ask > 0:
+                    mid = (bid + ask) / 2
+                    spread_pct = ((ask - bid) / mid) * 100
+                    logger.info(f"Spread for {ticker}: bid=${bid:.2f}, ask=${ask:.2f}, spread={spread_pct:.2f}%")
+                    return round(spread_pct, 3)
+        except Exception as e:
+            logger.debug(f"Spread check failed for {ticker}: {e}")
+        return 0.0
+
+    # ── Phase 6b: VIX Level ────────────────────────────────────
+
+    def _get_vix_level(self) -> float:
+        """Fetch current VIX level. Returns 0.0 if unavailable."""
+        try:
+            import yfinance as yf
+            vix = yf.Ticker("^VIX")
+            hist = vix.history(period="1d")
+            if not hist.empty:
+                level = float(hist["Close"].iloc[-1])
+                logger.info(f"VIX level: {level:.1f}")
+                return level
+        except Exception as e:
+            logger.debug(f"VIX fetch failed: {e}")
+        return 0.0
+
+    # ── Phase 6c: Sector Lookup ────────────────────────────────
+
+    _sector_cache: dict[str, str] = {}
+
+    def _get_sector(self, ticker: str) -> str:
+        """Get GICS sector for a ticker. Cached to avoid repeated lookups."""
+        if ticker in self._sector_cache:
+            return self._sector_cache[ticker]
+        try:
+            import yfinance as yf
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            sector = info.get("sector", "Unknown")
+            self._sector_cache[ticker] = sector
+            return sector
+        except Exception as e:
+            logger.debug(f"Sector lookup failed for {ticker}: {e}")
+            self._sector_cache[ticker] = "Unknown"
+            return "Unknown"
+
     # ── Phase 4a: Limit Orders for Penny Stocks ──────────────────
 
     def _place_limit_order(self, ticker: str, shares: int, price: float, side: str) -> dict | None:
@@ -210,6 +276,15 @@ class ExecutionAgent:
         # Get SPY change for circuit breaker
         spy_change = self._get_spy_change()
 
+        # Phase 6b: Get VIX level for volatility circuit breaker
+        vix_level = self._get_vix_level()
+
+        # Phase 6a: Get bid-ask spread
+        spread_pct = self._get_spread_pct(ticker)
+
+        # Phase 6c: Get sector for concentration check
+        sector = self._get_sector(ticker)
+
         # Calculate position size first (needed for liquidity check)
         shares = self.risk_manager.calculate_position_size(
             account_value=account_value,
@@ -218,18 +293,48 @@ class ExecutionAgent:
             portfolio=portfolio,
         )
 
-        # Apply volatility adjustment if ATR data available
+        # Apply volatility adjustment if ATR data available — now with real median
         adv_tech = analysis.get("advanced_technicals", {})
+        current_atr = 0.0
         if adv_tech:
             atr_data = adv_tech.get("atr", {})
             current_atr = atr_data.get("atr", 0) if atr_data else 0
             if current_atr > 0:
-                # Use current_atr as both current and median for now (will improve with historical)
-                vol_mult = self.risk_manager.check_volatility_adjustment(current_atr, current_atr * 0.7)
+                # Store ATR for future median calculation
+                self.db.save_atr(ticker, current_atr)
+                # Use real median from history, fall back to 70% estimate
+                median_atr = self.db.get_median_atr(ticker)
+                if median_atr <= 0:
+                    median_atr = current_atr * 0.7
+                vol_mult = self.risk_manager.check_volatility_adjustment(current_atr, median_atr)
                 if vol_mult < 1.0:
                     shares = int(shares * vol_mult)
 
-        # Pre-trade validation with new checks
+        # Phase 6d: Overnight gap risk — reduce position for high-gap-risk names
+        fundamentals = analysis.get("fundamentals", {})
+        beta = fundamentals.get("financials", {}).get("beta", 1.0) if fundamentals else 1.0
+        earnings_info = self.risk_manager.check_earnings_proximity(ticker)
+        gap_mult = self.risk_manager.calculate_gap_risk_multiplier(
+            current_atr=current_atr,
+            current_price=current_price,
+            beta=beta or 1.0,
+            near_earnings=earnings_info.get("near_earnings", False),
+        )
+        if gap_mult < 1.0:
+            original_shares = shares
+            shares = max(1, int(shares * gap_mult))
+            logger.info(f"Gap risk: {ticker} position reduced {original_shares} → {shares} shares")
+
+        # Phase 8c: Sector rotation awareness — warn if sector is weak
+        if sector and sector != "Unknown":
+            sector_trend = self.risk_manager.check_sector_trend(sector)
+            if not sector_trend["uptrend"]:
+                logger.warning(
+                    f"SECTOR WEAK: {sector} ({sector_trend['etf']}) below 50-SMA — "
+                    f"trade in {ticker} carries sector headwind risk"
+                )
+
+        # Pre-trade validation with all checks
         validation = self.risk_manager.validate_trade(
             ticker=ticker,
             conviction=conviction,
@@ -242,6 +347,10 @@ class ExecutionAgent:
             avg_daily_volume=avg_daily_volume,
             spy_change_pct=spy_change,
             edges_firing=edges_firing,
+            spread_pct=spread_pct,
+            vix_level=vix_level,
+            sector=sector,
+            entry_price=current_price,
         )
 
         if not validation["approved"]:
@@ -293,6 +402,14 @@ class ExecutionAgent:
 
         rr_ratio = take_profit_pct / stop_loss_pct if stop_loss_pct > 0 else 0
 
+        # Phase 8a: Warn if this ticker has historically bad slippage
+        historical_slippage = self.db.get_ticker_slippage_avg(ticker)
+        if abs(historical_slippage) > 0.5:
+            logger.warning(
+                f"SLIPPAGE WARNING: {ticker} has avg slippage of {historical_slippage:+.2f}% "
+                f"from past trades — consider limit order"
+            )
+
         # Phase 5d: Trade transparency — log summary before execution
         self._log_trade_summary(
             ticker, action, shares, current_price, risk_amount,
@@ -343,6 +460,31 @@ class ExecutionAgent:
                         success=True,
                     )
 
+                # Phase 7c: Poll order status for fill confirmation
+                fill_result = self._poll_order_status(alpaca_order_id, ticker, shares)
+                if fill_result["status"] in ("rejected", "canceled", "expired", "suspended"):
+                    # Retry once as a limit order
+                    side_str = "buy" if side == OrderSide.BUY else "sell"
+                    retry_order = self._retry_as_limit_order(ticker, shares, current_price, side_str)
+                    if retry_order:
+                        alpaca_order_id = retry_order["id"]
+                        logger.info(f"Order retried as limit: {alpaca_order_id}")
+                    else:
+                        return {
+                            "status": "ERROR",
+                            "ticker": ticker,
+                            "message": f"Order {fill_result['status']} and retry failed",
+                        }
+                elif fill_result["filled_qty"] > 0 and fill_result["filled_qty"] < shares:
+                    # Partial fill — adjust shares to what actually filled
+                    shares = fill_result["filled_qty"]
+                    current_price = fill_result["filled_price"] or current_price
+                    risk_per_share = current_price * (stop_loss_pct / 100)
+                    risk_amount = round(shares * risk_per_share, 2)
+                    logger.warning(
+                        f"PARTIAL FILL for {ticker}: adjusted to {shares} shares @ ${current_price:.2f}"
+                    )
+
             # Log trade to database with new fields
             edge_details_json = ""
             try:
@@ -364,14 +506,32 @@ class ExecutionAgent:
             }
             trade_id = self.db.save_trade(trade_record, portfolio=portfolio)
 
-            # Set original_quantity and edge data on the trade
+            # Set original_quantity, edge data, and sector on the trade
             with self.db._get_conn() as conn:
                 conn.execute(
                     """UPDATE trades SET original_quantity = ?, highest_price = ?,
-                       edges_fired = ?, edge_details = ?, risk_amount = ?
+                       edges_fired = ?, edge_details = ?, risk_amount = ?, sector = ?
                        WHERE id = ?""",
-                    (shares, current_price, edges_firing, edge_details_json, risk_amount, trade_id),
+                    (shares, current_price, edges_firing, edge_details_json, risk_amount, sector, trade_id),
                 )
+
+            # Phase 8a: Record slippage after fill
+            fill_check = self._check_fill_slippage(alpaca_order_id, current_price, ticker)
+            if fill_check is not None:
+                order_type_str = "limit" if use_limit else "market"
+                side_str = "buy" if side == OrderSide.BUY else "sell"
+                # Get actual filled price for slippage record
+                try:
+                    fill_resp = self._session.get(f"{self._base_url}/v2/orders/{alpaca_order_id}")
+                    if fill_resp.ok:
+                        actual_price = float(fill_resp.json().get("filled_avg_price", 0) or 0)
+                        if actual_price > 0:
+                            self.db.save_slippage(
+                                ticker, current_price, actual_price,
+                                order_type_str, side_str, shares, portfolio,
+                            )
+                except Exception:
+                    pass
 
             logger.info(
                 f"ORDER EXECUTED — {action} {shares}x {ticker} @ ~${current_price} | "
@@ -417,6 +577,96 @@ class ExecutionAgent:
                 "ticker": ticker,
                 "message": f"Execution failed: {e}",
             }
+
+    # ── Phase 7c: Order Status Polling & Partial Fill Handling ────
+
+    def _poll_order_status(self, order_id: str, ticker: str, expected_qty: int, timeout_seconds: int = 30) -> dict:
+        """Poll order status and handle partial fills and rejections.
+
+        Returns {"status": str, "filled_qty": int, "filled_price": float, "order_id": str}.
+        """
+        import time
+
+        deadline = time.time() + timeout_seconds
+        last_status = "new"
+
+        while time.time() < deadline:
+            try:
+                resp = self._session.get(f"{self._base_url}/v2/orders/{order_id}")
+                if not resp.ok:
+                    break
+                order = resp.json()
+                status = order.get("status", "")
+                filled_qty = int(order.get("filled_qty", 0) or 0)
+                filled_price = float(order.get("filled_avg_price", 0) or 0)
+                last_status = status
+
+                if status == "filled":
+                    if filled_qty < expected_qty:
+                        logger.warning(
+                            f"PARTIAL FILL: {ticker} — expected {expected_qty}, got {filled_qty} "
+                            f"@ ${filled_price:.2f}"
+                        )
+                    return {
+                        "status": "filled",
+                        "filled_qty": filled_qty,
+                        "filled_price": filled_price,
+                        "order_id": order_id,
+                    }
+                elif status == "partially_filled":
+                    logger.info(
+                        f"Order {order_id} partially filled: {filled_qty}/{expected_qty} "
+                        f"for {ticker} @ ${filled_price:.2f}"
+                    )
+                    # Continue polling — may fill completely
+                elif status in ("rejected", "canceled", "expired", "suspended"):
+                    logger.warning(f"Order {order_id} {status} for {ticker}")
+                    return {
+                        "status": status,
+                        "filled_qty": filled_qty,
+                        "filled_price": filled_price,
+                        "order_id": order_id,
+                    }
+                # new, accepted, pending_new — keep polling
+
+            except Exception as e:
+                logger.debug(f"Order poll error for {order_id}: {e}")
+
+            time.sleep(2)
+
+        # Timeout — check final state
+        logger.info(f"Order {order_id} poll timeout (status={last_status}) for {ticker}")
+        return {
+            "status": last_status,
+            "filled_qty": 0,
+            "filled_price": 0.0,
+            "order_id": order_id,
+        }
+
+    def _retry_as_limit_order(self, ticker: str, shares: int, price: float, side: str) -> dict | None:
+        """Retry a failed market order as a limit order with slippage buffer."""
+        limit_price = round(price * (1 + self.config.MAX_SLIPPAGE_PCT / 100), 2) if side == "buy" else \
+                      round(price * (1 - self.config.MAX_SLIPPAGE_PCT / 100), 2)
+
+        logger.info(f"RETRY: placing limit order for {shares}x {ticker} @ ${limit_price} ({side})")
+        order_payload = {
+            "symbol": ticker,
+            "qty": str(shares),
+            "side": side,
+            "type": "limit",
+            "limit_price": str(limit_price),
+            "time_in_force": "day",
+        }
+        try:
+            resp = self._session.post(f"{self._base_url}/v2/orders", json=order_payload)
+            self._capture_request_id(resp, "/v2/orders", "POST", ticker=ticker)
+            resp.raise_for_status()
+            order_data = resp.json()
+            logger.info(f"RETRY limit order placed: {order_data['id']} for {ticker}")
+            return order_data
+        except Exception as e:
+            logger.error(f"Retry limit order failed for {ticker}: {e}")
+            return None
 
     # ── Phase 4b: Slippage Tracking ───────────────────────────────
 
@@ -500,8 +750,82 @@ class ExecutionAgent:
 
     # ── Phase 2: Enhanced Exit Conditions ─────────────────────────
 
+    def _get_daily_high_low(self, ticker: str) -> tuple[float, float]:
+        """Fetch today's intraday high and low from Alpaca snapshot.
+
+        Prevents trailing stop race condition where a spike+reversal within
+        one check cycle would miss the true high.
+        """
+        try:
+            resp = self._session.get(
+                f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot",
+                headers={
+                    "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
+                    "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                },
+            )
+            if resp.ok:
+                data = resp.json()
+                daily = data.get("dailyBar", {})
+                return float(daily.get("h", 0)), float(daily.get("l", 0))
+        except Exception as e:
+            logger.debug(f"Daily high/low fetch failed for {ticker}: {e}")
+        return 0.0, 0.0
+
+    # ── Phase 7a: Momentum Divergence Exit ─────────────────────
+
+    def _check_momentum_divergence(self, ticker: str, entry: float, current: float, is_long: bool) -> dict:
+        """Check if RSI/MACD signals suggest momentum is fading on a profitable position.
+
+        Returns {"should_tighten": bool, "should_exit": bool, "reason": str}.
+        """
+        result = {"should_tighten": False, "should_exit": False, "reason": ""}
+
+        if entry <= 0:
+            return result
+
+        profit_pct = ((current - entry) / entry * 100) if is_long else ((entry - current) / entry * 100)
+        if profit_pct <= 0:
+            return result  # Only check divergence on profitable positions
+
+        try:
+            from utils.alpaca_data import AlpacaMarketData
+            alpaca = AlpacaMarketData(self.db)
+            tech = alpaca.get_technicals(ticker)
+            if "error" in tech:
+                return result
+
+            rsi = tech.get("rsi_14", 50)
+
+            # RSI overbought on a profitable long — tighten stop
+            if is_long and rsi > 75:
+                result["should_tighten"] = True
+                result["reason"] = f"Momentum divergence: RSI overbought ({rsi:.0f}) on profitable position"
+                logger.info(f"MOMENTUM WARN {ticker}: RSI={rsi:.0f}, profit={profit_pct:.1f}% — tightening stop")
+
+            # RSI oversold on a profitable short — tighten stop
+            if not is_long and rsi < 25:
+                result["should_tighten"] = True
+                result["reason"] = f"Momentum divergence: RSI oversold ({rsi:.0f}) on profitable short"
+
+            # Strong reversal signal: RSI was overbought and now dropping fast
+            if is_long and rsi > 70 and profit_pct > 5:
+                # Check if price is near daily high but volume is weak
+                vol_ratio = tech.get("volume_ratio", 1.0)
+                if vol_ratio < 0.7:
+                    result["should_tighten"] = True
+                    result["reason"] = (
+                        f"Momentum fading: RSI={rsi:.0f}, volume weak ({vol_ratio:.1f}x avg), "
+                        f"profit={profit_pct:.1f}% — tightening stop"
+                    )
+
+        except Exception as e:
+            logger.debug(f"Momentum divergence check failed for {ticker}: {e}")
+
+        return result
+
     def check_exit_conditions(self) -> list[dict]:
-        """Check open positions against SL, TP, trailing stops, time stops, and earnings."""
+        """Check open positions against SL, TP, trailing stops, time stops, momentum, and earnings."""
         exits = []
         open_trades = self.db.get_open_trades()
         positions = {p["ticker"]: p for p in self.get_positions()}
@@ -527,11 +851,19 @@ class ExecutionAgent:
 
             is_long = trade["action"] == "BUY"
 
-            # Phase 2b: Update trailing stop
-            if is_long and current > (highest or 0):
-                highest = current
-            elif not is_long and (highest == 0 or current < highest):
-                highest = current
+            # Phase 7 fix: Use daily high/low instead of just current price
+            # to prevent trailing stop race condition on intraday spikes
+            daily_high, daily_low = self._get_daily_high_low(ticker)
+
+            if is_long:
+                # Use the greater of current price and today's intraday high
+                peak = max(current, daily_high) if daily_high > 0 else current
+                if peak > (highest or 0):
+                    highest = peak
+            else:
+                trough = min(current, daily_low) if daily_low > 0 else current
+                if highest == 0 or trough < highest:
+                    highest = trough
 
             # Check trailing stop activation
             if entry and entry > 0:
@@ -591,6 +923,36 @@ class ExecutionAgent:
                                         partial_exit = True
                                         reason = f"Scale-out at {level}R (profit: {r_multiple:.1f}R)"
                                         break
+
+            # Phase 7a: Momentum divergence exit — tighten stop if RSI overbought on profit
+            if not should_exit and not partial_exit and entry and entry > 0:
+                momentum = self._check_momentum_divergence(ticker, entry, current, is_long)
+                if momentum["should_tighten"] and sl and entry:
+                    if is_long:
+                        # Tighten stop to 50% of current distance
+                        tightened = round(current - (current - sl) * 0.5, 2)
+                        if tightened > sl:
+                            sl = tightened
+                            with self.db._get_conn() as conn:
+                                conn.execute(
+                                    "UPDATE trades SET stop_loss_price = ? WHERE id = ?",
+                                    (sl, trade["id"]),
+                                )
+                            logger.info(
+                                f"MOMENTUM TIGHTEN {ticker}: SL moved to ${sl} — {momentum['reason']}"
+                            )
+                    else:
+                        tightened = round(current + (sl - current) * 0.5, 2)
+                        if tightened < sl:
+                            sl = tightened
+                            with self.db._get_conn() as conn:
+                                conn.execute(
+                                    "UPDATE trades SET stop_loss_price = ? WHERE id = ?",
+                                    (sl, trade["id"]),
+                                )
+                            logger.info(
+                                f"MOMENTUM TIGHTEN {ticker}: SL moved to ${sl} — {momentum['reason']}"
+                            )
 
             # Phase 2d: Time stop
             if not should_exit and not partial_exit:

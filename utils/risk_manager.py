@@ -6,6 +6,7 @@ from datetime import datetime
 
 from config import Config
 from utils.database import Database
+from utils.market_clock import get_market_clock
 
 logger = logging.getLogger(__name__)
 
@@ -187,13 +188,25 @@ class RiskManager:
 
     # ── Phase 5a: Market Circuit Breaker ──────────────────────────
 
-    def check_market_health(self, spy_intraday_change_pct: float, action: str = "BUY") -> bool:
+    def check_market_health(
+        self, spy_intraday_change_pct: float, action: str = "BUY", vix_level: float = 0.0
+    ) -> bool:
         """Return True if market conditions allow the trade.
 
-        Blocks new LONG entries if SPY drops > CIRCUIT_BREAKER_SPY_DROP_PCT intraday.
+        Blocks new entries if:
+        - SPY drops > CIRCUIT_BREAKER_SPY_DROP_PCT intraday (longs only)
+        - VIX > CIRCUIT_BREAKER_VIX_THRESHOLD (all entries)
         """
+        # VIX circuit breaker — blocks ALL new entries when fear is extreme
+        if vix_level > 0 and vix_level >= self.config.CIRCUIT_BREAKER_VIX_THRESHOLD:
+            logger.warning(
+                f"VIX CIRCUIT BREAKER: VIX at {vix_level:.1f} "
+                f"(threshold: {self.config.CIRCUIT_BREAKER_VIX_THRESHOLD}) — blocking ALL entries"
+            )
+            return False
+
         if action != "BUY":
-            return True  # Only block longs
+            return True  # SPY check only blocks longs
         if spy_intraday_change_pct < self.config.CIRCUIT_BREAKER_SPY_DROP_PCT:
             logger.warning(
                 f"CIRCUIT BREAKER: SPY down {spy_intraday_change_pct:.2f}% "
@@ -202,14 +215,202 @@ class RiskManager:
             return False
         return True
 
+    # ── Phase 6a: Bid-Ask Spread Validation ────────────────────
+
+    def check_spread(self, spread_pct: float, portfolio: str = "main") -> bool:
+        """Return True if bid-ask spread is acceptable for the order type.
+
+        Wide spreads cause hidden slippage on market orders.
+        """
+        max_spread = (
+            self.config.PENNY_MAX_SPREAD_PCT
+            if portfolio == "penny"
+            else self.config.MAX_SPREAD_PCT
+        )
+        if spread_pct > max_spread:
+            logger.warning(
+                f"SPREAD CHECK FAILED: spread {spread_pct:.2f}% > max {max_spread:.1f}% — "
+                f"order would suffer excessive slippage"
+            )
+            return False
+        return True
+
+    # ── Phase 6b: Sector Concentration ─────────────────────────
+
+    def check_sector_concentration(
+        self, ticker: str, sector: str, account_value: float, entry_value: float
+    ) -> bool:
+        """Return True if adding this position won't exceed sector exposure limit.
+
+        Prevents correlated drawdowns from over-concentration in one sector.
+        """
+        if not sector or sector == "Unknown":
+            return True  # Can't validate without sector data
+
+        open_trades = self.db.get_open_trades()
+        sector_exposure = 0.0
+
+        for trade in open_trades:
+            trade_sector = trade.get("sector", "")
+            if trade_sector == sector:
+                trade_value = (trade.get("entry_price", 0) or 0) * (trade.get("quantity", 0) or 0)
+                sector_exposure += trade_value
+
+        # Add proposed trade
+        new_total = sector_exposure + entry_value
+        exposure_pct = new_total / account_value if account_value > 0 else 0
+
+        if exposure_pct > self.config.MAX_SECTOR_EXPOSURE_PCT:
+            logger.warning(
+                f"SECTOR CONCENTRATION: {sector} exposure would be {exposure_pct*100:.1f}% "
+                f"(limit: {self.config.MAX_SECTOR_EXPOSURE_PCT*100:.0f}%) — blocking {ticker}"
+            )
+            return False
+
+        logger.info(f"Sector check OK: {sector} exposure {exposure_pct*100:.1f}% (adding {ticker})")
+        return True
+
+    # ── Phase 6c: Overnight Gap Risk ───────────────────────────
+
+    def calculate_gap_risk_multiplier(
+        self, current_atr: float, current_price: float, beta: float = 1.0,
+        near_earnings: bool = False,
+    ) -> float:
+        """Calculate a position size multiplier based on overnight gap risk.
+
+        High-gap-risk stocks (high ATR/price ratio, high beta, near earnings)
+        get reduced position sizes. Returns multiplier 0.5-1.0.
+        """
+        if current_price <= 0:
+            return 1.0
+
+        atr_pct = (current_atr / current_price) * 100 if current_atr > 0 else 0
+        risk_score = 0.0
+
+        # ATR as % of price — high means big daily swings = bigger gaps
+        if atr_pct > self.config.GAP_RISK_ATR_THRESHOLD:
+            risk_score += 1.0
+        elif atr_pct > self.config.GAP_RISK_ATR_THRESHOLD * 0.7:
+            risk_score += 0.5
+
+        # High beta stocks gap harder with market moves
+        if beta > 2.0:
+            risk_score += 1.0
+        elif beta > 1.5:
+            risk_score += 0.5
+
+        # Near earnings = maximum gap risk
+        if near_earnings:
+            risk_score += 1.5
+
+        if risk_score >= 2.0:
+            mult = self.config.GAP_RISK_POSITION_REDUCTION
+            logger.warning(
+                f"HIGH GAP RISK (score={risk_score:.1f}): ATR%={atr_pct:.1f}%, "
+                f"beta={beta:.1f}, earnings={'yes' if near_earnings else 'no'} — "
+                f"reducing position to {mult*100:.0f}%"
+            )
+            return mult
+        elif risk_score >= 1.0:
+            mult = 0.75
+            logger.info(
+                f"Moderate gap risk (score={risk_score:.1f}): "
+                f"reducing position to {mult*100:.0f}%"
+            )
+            return mult
+
+        return 1.0
+
+    # ── Phase 8c: Sector Rotation Awareness ──────────────────────
+
+    _SECTOR_ETF_MAP = {
+        "Technology": "XLK",
+        "Healthcare": "XLV",
+        "Financials": "XLF",
+        "Energy": "XLE",
+        "Consumer Cyclical": "XLY",
+        "Consumer Defensive": "XLP",
+        "Industrials": "XLI",
+        "Communication Services": "XLC",
+        "Real Estate": "XLRE",
+        "Utilities": "XLU",
+        "Basic Materials": "XLB",
+    }
+
+    _sector_trend_cache: dict[str, tuple[bool, datetime]] = {}
+
+    def check_sector_trend(self, sector: str) -> dict:
+        """Check if the sector ETF is above its 50-day SMA (in an uptrend).
+
+        Returns {"sector": str, "etf": str, "uptrend": bool, "above_sma50": bool,
+                 "daily_change_pct": float}.
+        Not a hard block — used as a soft signal for conviction adjustment.
+        """
+        etf = self._SECTOR_ETF_MAP.get(sector, "")
+        default = {"sector": sector, "etf": etf, "uptrend": True, "above_sma50": True, "daily_change_pct": 0.0}
+
+        if not etf:
+            return default
+
+        # Cache for 30 minutes
+        cached = self._sector_trend_cache.get(etf)
+        if cached:
+            uptrend, fetched_at = cached
+            if (datetime.now() - fetched_at).total_seconds() < 1800:
+                return {**default, "uptrend": uptrend, "above_sma50": uptrend}
+
+        try:
+            import yfinance as yf
+            stock = yf.Ticker(etf)
+            hist = stock.history(period="3mo")
+            if hist.empty or len(hist) < 50:
+                return default
+
+            sma_50 = hist["Close"].tail(50).mean()
+            current = hist["Close"].iloc[-1]
+            prev = hist["Close"].iloc[-2] if len(hist) > 1 else current
+            daily_change = ((current - prev) / prev) * 100
+
+            uptrend = current > sma_50
+
+            self._sector_trend_cache[etf] = (uptrend, datetime.now())
+
+            if not uptrend:
+                logger.info(
+                    f"SECTOR ROTATION: {sector} ({etf}) BELOW 50-SMA "
+                    f"(${current:.2f} < ${sma_50:.2f}) — weak sector"
+                )
+
+            return {
+                "sector": sector,
+                "etf": etf,
+                "uptrend": uptrend,
+                "above_sma50": uptrend,
+                "daily_change_pct": round(daily_change, 2),
+            }
+
+        except Exception as e:
+            logger.debug(f"Sector trend check failed for {sector}/{etf}: {e}")
+            return default
+
     # ── Phase 5b: Earnings Awareness ─────────────────────────────
 
     def check_earnings_proximity(self, ticker: str) -> dict:
         """Check if ticker has earnings within EARNINGS_EXIT_DAYS trading days.
 
-        Returns {"near_earnings": bool, "days_until": int|None, "action": str}.
+        Phase 7b enhancement: also checks hours until earnings.
+        If earnings are < 12 hours away (e.g., pre-market next morning when checked
+        at 3pm), flags as imminent even if day count shows 1 day.
+
+        Returns {"near_earnings": bool, "days_until": int|None, "hours_until": float|None,
+                 "imminent": bool, "action": str}.
         """
         import yfinance as yf
+
+        default_result = {
+            "near_earnings": False, "days_until": None,
+            "hours_until": None, "imminent": False, "action": "none",
+        }
 
         # Check cache (24h TTL)
         cached = self._earnings_cache.get(ticker)
@@ -220,11 +421,21 @@ class RiskManager:
                     try:
                         earn_dt = datetime.strptime(cached_date[:10], "%Y-%m-%d")
                         days = (earn_dt - datetime.now()).days
+                        # Estimate hours: assume pre-market earnings at 7am ET next day
+                        # If today is the day before, and it's after 3pm, that's < 16 hours
+                        hours = (earn_dt - datetime.now()).total_seconds() / 3600
                         near = 0 <= days <= self.config.EARNINGS_EXIT_DAYS
-                        return {"near_earnings": near, "days_until": days, "action": self.config.EARNINGS_EXIT_MODE if near else "none"}
+                        imminent = 0 < hours < 12
+                        near = near or imminent
+                        action = self.config.EARNINGS_EXIT_MODE if near else "none"
+                        return {
+                            "near_earnings": near, "days_until": days,
+                            "hours_until": round(hours, 1), "imminent": imminent,
+                            "action": action,
+                        }
                     except Exception:
                         pass
-                return {"near_earnings": False, "days_until": None, "action": "none"}
+                return default_result
 
         # Fetch from yfinance
         try:
@@ -244,16 +455,28 @@ class RiskManager:
             if earn_date:
                 earn_dt = datetime.strptime(earn_date[:10], "%Y-%m-%d")
                 days = (earn_dt - datetime.now()).days
+                hours = (earn_dt - datetime.now()).total_seconds() / 3600
                 near = 0 <= days <= self.config.EARNINGS_EXIT_DAYS
+                imminent = 0 < hours < 12
+                near = near or imminent
+
+                if imminent:
+                    logger.warning(
+                        f"EARNINGS IMMINENT for {ticker}: {hours:.0f} hours away "
+                        f"(< 12h threshold) — blocking entry"
+                    )
+
                 return {
                     "near_earnings": near,
                     "days_until": days,
+                    "hours_until": round(hours, 1),
+                    "imminent": imminent,
                     "action": self.config.EARNINGS_EXIT_MODE if near else "none",
                 }
         except Exception as e:
             logger.debug(f"Earnings check failed for {ticker}: {e}")
 
-        return {"near_earnings": False, "days_until": None, "action": "none"}
+        return default_result
 
     # ── Original methods (preserved) ──────────────────────────────
 
@@ -275,12 +498,8 @@ class RiskManager:
         return not any(t["ticker"] == ticker for t in open_trades)
 
     def is_market_hours(self) -> bool:
-        """Check if US market is currently open (basic check, ET timezone)."""
-        now = datetime.now()
-        if now.weekday() > 4:
-            return False
-        market_minutes = now.hour * 60 + now.minute
-        return 9 * 60 + 30 <= market_minutes < 16 * 60
+        """Check if US market is currently open via Alpaca clock API."""
+        return get_market_clock().is_market_open()
 
     def validate_trade(
         self,
@@ -295,9 +514,14 @@ class RiskManager:
         avg_daily_volume: int = 0,
         spy_change_pct: float = 0.0,
         edges_firing: int = 3,
+        spread_pct: float = 0.0,
+        vix_level: float = 0.0,
+        sector: str = "",
+        entry_price: float = 0.0,
     ) -> dict:
         """Run all pre-trade safety checks including new risk gates. Returns pass/fail with reasons."""
         params = self._get_params(portfolio)
+        entry_value = entry_price * proposed_shares if entry_price > 0 else 0
         checks = {
             "conviction_met": conviction >= params["min_conviction"],
             "risk_within_limit": stop_loss_pct <= (params["max_risk_per_trade"] * 100 * 5),
@@ -317,10 +541,14 @@ class RiskManager:
             "liquidity_ok": self.check_liquidity(proposed_shares, avg_daily_volume) if avg_daily_volume > 0 else True,
             # Phase 3: Edge validation
             "edges_ok": edges_firing >= self.config.MIN_EDGES_REQUIRED,
-            # Phase 5a: Market circuit breaker
-            "market_health_ok": self.check_market_health(spy_change_pct, action),
+            # Phase 5a: Market circuit breaker (now with VIX)
+            "market_health_ok": self.check_market_health(spy_change_pct, action, vix_level=vix_level),
             # Phase 5b: Earnings awareness
             "earnings_ok": not self.check_earnings_proximity(ticker)["near_earnings"],
+            # Phase 6a: Bid-ask spread validation
+            "spread_ok": self.check_spread(spread_pct, portfolio) if spread_pct > 0 else True,
+            # Phase 6b: Sector concentration
+            "sector_ok": self.check_sector_concentration(ticker, sector, account_value, entry_value) if sector else True,
         }
 
         all_passed = all(checks.values())

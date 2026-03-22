@@ -10,8 +10,8 @@ cd "$DIR"
 PIDFILE="$DIR/.trader.pid"
 DASHBOARD_PIDFILE="$DIR/.dashboard.pid"
 LOG="$DIR/deepthinktrader.log"
-STREAMLIT="/Users/rebelhawk/Library/Python/3.9/bin/streamlit"
-PYTHON="/usr/bin/python3"
+PYTHON="$DIR/.venv/bin/python3"
+STREAMLIT="$DIR/.venv/bin/streamlit"
 
 # Colors
 GREEN='\033[0;32m'

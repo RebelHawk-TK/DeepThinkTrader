@@ -144,8 +144,23 @@ class Config:
 
     # ── Phase 5: Market Awareness + Learning ──────────────────────
     CIRCUIT_BREAKER_SPY_DROP_PCT: float = float(os.getenv("CIRCUIT_BREAKER_SPY_DROP_PCT", "-2.0"))
+    CIRCUIT_BREAKER_VIX_THRESHOLD: float = float(os.getenv("CIRCUIT_BREAKER_VIX_THRESHOLD", "30.0"))
+
+    # ── Phase 6: Execution Quality ──────────────────────────────
+    MAX_SPREAD_PCT: float = float(os.getenv("MAX_SPREAD_PCT", "1.0"))
+    PENNY_MAX_SPREAD_PCT: float = float(os.getenv("PENNY_MAX_SPREAD_PCT", "2.0"))
+    MAX_SECTOR_EXPOSURE_PCT: float = float(os.getenv("MAX_SECTOR_EXPOSURE_PCT", "0.25"))
+    GAP_RISK_ATR_THRESHOLD: float = float(os.getenv("GAP_RISK_ATR_THRESHOLD", "5.0"))
+    GAP_RISK_POSITION_REDUCTION: float = float(os.getenv("GAP_RISK_POSITION_REDUCTION", "0.5"))
     EARNINGS_EXIT_DAYS: int = int(os.getenv("EARNINGS_EXIT_DAYS", "2"))
     EARNINGS_EXIT_MODE: str = os.getenv("EARNINGS_EXIT_MODE", "close")
+
+    # Obsidian Vault (Seeking Alpha emails)
+    OBSIDIAN_VAULT_PATH: str = os.getenv(
+        "OBSIDIAN_VAULT_PATH",
+        os.path.expanduser("~/Documents/RHVault/RHVault"),
+    )
+    OBSIDIAN_SA_MAX_AGE_DAYS: int = int(os.getenv("OBSIDIAN_SA_MAX_AGE_DAYS", "7"))
 
     # Database
     DB_PATH: str = os.path.join(os.path.dirname(__file__), "trades.db")

@@ -18,6 +18,25 @@ from config import Config
 from utils.database import Database
 
 st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="wide")
+
+# Compact metrics so values don't truncate at smaller window widths
+st.markdown("""<style>
+[data-testid="stMetric"] {
+    overflow: hidden;
+}
+[data-testid="stMetricValue"] {
+    font-size: clamp(1rem, 2.2vw, 1.8rem);
+    white-space: nowrap;
+}
+[data-testid="stMetricLabel"] {
+    font-size: clamp(0.65rem, 1.2vw, 0.85rem);
+}
+[data-testid="stMetricDelta"] {
+    font-size: clamp(0.6rem, 1vw, 0.8rem);
+}
+h1 { font-size: clamp(1.4rem, 3vw, 2.2rem) !important; }
+</style>""", unsafe_allow_html=True)
+
 st.title("DeepThinkTrader Dashboard")
 
 YAHOO_URL = "https://finance.yahoo.com/quote"
@@ -110,25 +129,28 @@ portfolio_hist = get_portfolio_history()
 
 st.sidebar.header("Controls")
 
-# Auto-refresh with adjustable interval (persisted via query params)
+# Auto-refresh with adjustable interval (persisted via session state)
 auto_refresh = st.sidebar.toggle("Auto Refresh", value=True)
 
-# Read interval from URL query param so it survives page reloads
-_qp = st.query_params
-_saved_interval = int(_qp.get("ri", "300"))
 _interval_options = [10, 15, 30, 60, 120, 300]
-if _saved_interval not in _interval_options:
-    _saved_interval = 30
+
+# Use session_state to persist interval across reruns
+if "refresh_interval" not in st.session_state:
+    # First load: try query param, then default to 300 (5m)
+    _qp_val = int(st.query_params.get("ri", "300"))
+    st.session_state["refresh_interval"] = _qp_val if _qp_val in _interval_options else 300
 
 refresh_interval = st.sidebar.select_slider(
     "Refresh interval",
     options=_interval_options,
-    value=_saved_interval,
+    value=st.session_state["refresh_interval"],
     format_func=lambda x: f"{x}s" if x < 60 else f"{x//60}m",
+    key="ri_slider",
 )
 
-# Persist to query param when changed
-if refresh_interval != _saved_interval:
+# Persist when changed
+if refresh_interval != st.session_state["refresh_interval"]:
+    st.session_state["refresh_interval"] = refresh_interval
     st.query_params["ri"] = str(refresh_interval)
 
 if st.sidebar.button("Refresh Now"):
@@ -137,17 +159,6 @@ if st.sidebar.button("Refresh Now"):
 
 if auto_refresh:
     st.cache_data.clear()
-    import streamlit.components.v1 as components
-    components.html(
-        f"""<script>
-            setTimeout(function(){{
-                var url = new URL(window.parent.location);
-                url.searchParams.set('ri', '{refresh_interval}');
-                window.parent.location.href = url.toString();
-            }}, {refresh_interval * 1000});
-        </script>""",
-        height=0,
-    )
 
 st.sidebar.markdown("---")
 
@@ -259,6 +270,42 @@ if os.path.exists(log_path):
 
 st.sidebar.markdown(f"**Last Activity:** {last_activity}")
 st.sidebar.markdown(f"**Errors (recent):** {'🔴 ' + str(error_count_24h) if error_count_24h > 5 else str(error_count_24h)}")
+
+# === MARKET CLOCK (v2.0) ===
+st.sidebar.markdown("---")
+st.sidebar.subheader("Market Clock")
+try:
+    from utils.market_clock import get_market_clock
+    _mclock = get_market_clock()
+    _mstatus = _mclock.get_status()
+    _open_icon = "🟢" if _mstatus["is_open"] else "🔴"
+    _open_label = "OPEN" if _mstatus["is_open"] else "CLOSED"
+    st.sidebar.markdown(f"**Status:** {_open_icon} {_open_label}")
+    st.sidebar.markdown(f"**ET Time:** {_mstatus['current_time_et']}")
+    if _mstatus["is_early_close"]:
+        st.sidebar.markdown("**Early Close Today**")
+    if _mstatus["is_open"]:
+        _mins_close = _mclock.minutes_until_close()
+        if _mins_close is not None:
+            _hrs = _mins_close // 60
+            _mins = _mins_close % 60
+            st.sidebar.markdown(f"**Closes in:** {_hrs}h {_mins}m")
+    else:
+        _mins_open = _mclock.minutes_until_open()
+        if _mins_open is not None:
+            if _mins_open < 60:
+                st.sidebar.markdown(f"**Opens in:** {_mins_open}m")
+            else:
+                _hrs = _mins_open // 60
+                _mins = _mins_open % 60
+                st.sidebar.markdown(f"**Opens in:** {_hrs}h {_mins}m")
+    if _mstatus["clock_drift_ms"] is not None:
+        _drift = _mstatus["clock_drift_ms"]
+        _drift_color = "🔴" if _drift > 5000 else ("🟡" if _drift > 2000 else "🟢")
+        st.sidebar.markdown(f"**Clock Drift:** {_drift_color} {_drift:.0f}ms")
+    st.sidebar.caption(f"Source: {_mstatus['source']}")
+except Exception as _e:
+    st.sidebar.markdown("**Market Clock:** unavailable")
 
 if account:
     st.sidebar.markdown("---")
@@ -1257,3 +1304,10 @@ with st.expander("Alpaca API Request IDs (debugging)"):
 # Footer
 st.divider()
 st.caption("DeepThinkTrader v2.0 — Paper Trading Mode | Risk-First Framework | Dashboard auto-refreshes on Streamlit file change")
+
+# Auto-refresh: sleep AFTER all content is rendered, then rerun
+if auto_refresh:
+    import time as _time
+    _time.sleep(refresh_interval)
+    st.query_params["ri"] = str(refresh_interval)
+    st.rerun()
