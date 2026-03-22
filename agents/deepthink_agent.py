@@ -135,6 +135,35 @@ class DeepThinkAgent:
             elif adx.get("trend_strength") == "weak":
                 bearish.append({"factor": "Weak/no trend (ADX < 20) — range-bound", "strength": 3})
 
+        # Seeking Alpha email intelligence
+        sa = report.get("seeking_alpha", {})
+        if sa.get("mentioned"):
+            sa_sent = sa.get("avg_sentiment", 0)
+            sa_cats = sa.get("categories", [])
+            mentions = sa.get("mention_count", 0)
+
+            if sa_sent > 0.2:
+                strength = min(10, max(3, int(sa_sent * 8) + mentions))
+                bullish.append({
+                    "factor": f"Seeking Alpha bullish coverage ({sa_sent:.2f}, {mentions} mentions)",
+                    "strength": strength,
+                })
+            elif sa_sent < -0.2:
+                strength = min(10, max(3, int(abs(sa_sent) * 8) + mentions))
+                bearish.append({
+                    "factor": f"Seeking Alpha bearish coverage ({sa_sent:.2f})",
+                    "strength": strength,
+                })
+
+            if "insider_activity" in sa_cats:
+                if sa_sent > 0:
+                    bullish.append({"factor": "SA insider buying signal", "strength": 6})
+                else:
+                    bearish.append({"factor": "SA insider selling signal", "strength": 6})
+
+            if "earnings" in sa_cats:
+                bearish.append({"factor": "SA earnings event risk", "strength": 4})
+
         # Pad minimums
         while len(bullish) < 2:
             bullish.append({"factor": "No additional bullish factor found", "strength": 1})
@@ -394,6 +423,52 @@ class DeepThinkAgent:
 
         # Step 6: Edge validation (Phase 3)
         edges_firing, edge_details = self._evaluate_edges(report)
+
+        # Phase 8c: Sector rotation awareness — penalize if sector ETF is weak
+        fundamentals = report.get("fundamentals", {})
+        sector = ""
+        if fundamentals:
+            try:
+                import yfinance as yf
+                ticker_obj = yf.Ticker(ticker)
+                sector = ticker_obj.info.get("sector", "")
+            except Exception:
+                pass
+
+        if sector:
+            from utils.risk_manager import RiskManager
+            rm = RiskManager(self.db)
+            sector_trend = rm.check_sector_trend(sector)
+            if not sector_trend["uptrend"]:
+                conviction = max(1, conviction - 0.5)
+                bearish.append({
+                    "factor": f"Sector headwind: {sector} ({sector_trend['etf']}) below 50-SMA",
+                    "strength": 4,
+                })
+
+        # Phase 8b: Adjust conviction based on historical edge combo performance
+        combo_parts = []
+        for e in edge_details:
+            if e["passed"]:
+                combo_parts.append(e["label"][0])  # F, T, or S
+        edge_combo = "+".join(combo_parts) if combo_parts else "none"
+
+        historical_wr = self.db.get_edge_combo_win_rate(edge_combo)
+        if historical_wr is not None:
+            if historical_wr > 0.65:
+                bonus = round((historical_wr - 0.5) * 3, 1)  # up to +1.5
+                conviction = min(10, conviction + bonus)
+                logger.info(
+                    f"Edge combo '{edge_combo}' has {historical_wr*100:.0f}% win rate — "
+                    f"conviction boosted +{bonus}"
+                )
+            elif historical_wr < 0.35:
+                penalty = round((0.5 - historical_wr) * 3, 1)  # up to -1.5
+                conviction = max(1, conviction - penalty)
+                logger.warning(
+                    f"Edge combo '{edge_combo}' has {historical_wr*100:.0f}% win rate — "
+                    f"conviction penalized -{penalty}"
+                )
 
         # Step 7: Decision — require at least MIN_EDGES_REQUIRED edges
         if edges_firing < self.config.MIN_EDGES_REQUIRED:

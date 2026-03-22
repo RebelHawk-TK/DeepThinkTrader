@@ -17,6 +17,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from config import Config
 from utils.alpaca_data import AlpacaMarketData
 from utils.database import Database
+from utils.obsidian_seeking_alpha import ObsidianSeekingAlpha
 from utils.twelve_data import TwelveData
 from utils.yahoo_fundamentals import YahooFundamentals
 
@@ -30,6 +31,10 @@ class ResearchAgent:
         self.alpaca_data = AlpacaMarketData(self.db)
         self.twelve_data = TwelveData() if self.config.RAPIDAPI_KEY else None
         self.yahoo_fundamentals = YahooFundamentals()
+        self.obsidian_sa = ObsidianSeekingAlpha(
+            vault_path=self.config.OBSIDIAN_VAULT_PATH,
+            max_age_days=self.config.OBSIDIAN_SA_MAX_AGE_DAYS,
+        )
         self.newsapi = NewsApiClient(api_key=self.config.NEWSAPI_KEY)
         self.vader = SentimentIntensityAnalyzer()
 
@@ -230,6 +235,13 @@ class ResearchAgent:
         except Exception as e:
             logger.error(f"Yahoo fundamentals error for {ticker}: {e}")
 
+        # Fetch Seeking Alpha intelligence from Obsidian
+        sa_intel = {}
+        try:
+            sa_intel = self.obsidian_sa.get_ticker_intel(ticker)
+        except Exception as e:
+            logger.error(f"Obsidian SA error for {ticker}: {e}")
+
         # Calculate combined scores
         news_impact = (
             round(sum(a["impact_score"] for a in news) / len(news), 1) if news else 0
@@ -278,30 +290,48 @@ class ResearchAgent:
                 # Amplify existing signal when trend is strong
                 adv_score *= 1.3
 
+        # Seeking Alpha sentiment score (scaled to -1..+1 range)
+        sa_score = 0.0
+        has_sa = sa_intel.get("mentioned", False)
+        if has_sa:
+            sa_score = sa_intel["avg_sentiment"]
+            # Boost if SA categorizes as earnings/insider/analyst (higher signal)
+            sa_cats = sa_intel.get("categories", [])
+            if any(c in sa_cats for c in ["insider_activity", "analyst", "earnings"]):
+                sa_score *= 1.3
+            sa_score = max(-1.0, min(1.0, sa_score))
+
         # Dynamically reweight when data sources are unavailable
         has_news = len(news) > 0
         has_reddit = self.reddit is not None and reddit["post_count"] > 0
         has_adv = bool(advanced_technicals)
 
+        # Base weights: news 25%, reddit 15%, tech 20%, advanced 25%, SA 15%
         if has_news and has_reddit:
-            w_news, w_reddit, w_tech, w_adv = 0.3, 0.2, 0.2, 0.3
+            w_news, w_reddit, w_tech, w_adv, w_sa = 0.25, 0.15, 0.20, 0.25, 0.15
         elif has_news:
-            w_news, w_reddit, w_tech, w_adv = 0.35, 0.0, 0.3, 0.35
+            w_news, w_reddit, w_tech, w_adv, w_sa = 0.30, 0.0, 0.25, 0.25, 0.20
         elif has_reddit:
-            w_news, w_reddit, w_tech, w_adv = 0.0, 0.25, 0.35, 0.4
+            w_news, w_reddit, w_tech, w_adv, w_sa = 0.0, 0.20, 0.30, 0.30, 0.20
         else:
-            # Only technicals available — give them full weight
-            w_news, w_reddit, w_tech, w_adv = 0.0, 0.0, 0.45, 0.55
+            w_news, w_reddit, w_tech, w_adv, w_sa = 0.0, 0.0, 0.35, 0.40, 0.25
 
         if not has_adv:
             w_tech += w_adv
             w_adv = 0.0
 
+        if not has_sa:
+            # Redistribute SA weight to news and tech
+            w_news += w_sa * 0.5
+            w_tech += w_sa * 0.5
+            w_sa = 0.0
+
         combined = round(
             (news_impact / 10 * w_news)
             + (reddit_score * w_reddit)
             + (tech_score * w_tech)
-            + (adv_score * w_adv),
+            + (adv_score * w_adv)
+            + (sa_score * w_sa),
             3,
         )
 
@@ -361,6 +391,33 @@ class ResearchAgent:
         if technicals.get("above_sma_10") and technicals.get("above_sma_20"):
             opportunities.append("Price above key moving averages — uptrend intact")
 
+        # Seeking Alpha email intelligence
+        if has_sa:
+            sa_cats = sa_intel.get("categories", [])
+            sa_sent = sa_intel.get("avg_sentiment", 0)
+            if "insider_activity" in sa_cats:
+                if sa_sent > 0:
+                    opportunities.append("SA: Insider buying activity noted")
+                else:
+                    risks.append("SA: Insider selling activity noted")
+            if "earnings" in sa_cats:
+                risks.append("SA: Earnings event highlighted — elevated volatility expected")
+            if "momentum" in sa_cats and sa_sent > 0:
+                opportunities.append("SA: Positive momentum flagged by Seeking Alpha")
+            if "risk" in sa_cats:
+                risks.append("SA: Risk factors highlighted in Seeking Alpha coverage")
+            if "analyst" in sa_cats:
+                if sa_sent > 0:
+                    opportunities.append("SA: Favorable analyst coverage")
+                else:
+                    risks.append("SA: Negative analyst coverage")
+            if "dividend" in sa_cats:
+                opportunities.append("SA: Dividend/yield play highlighted")
+            if sa_sent > 0.3 and "general_mention" not in sa_cats:
+                opportunities.append(f"SA: Strong positive sentiment ({sa_sent:.2f})")
+            elif sa_sent < -0.3:
+                risks.append(f"SA: Negative sentiment in coverage ({sa_sent:.2f})")
+
         # Fundamental risks/opportunities from Yahoo Finance
         if fundamentals:
             earnings = fundamentals.get("earnings", {})
@@ -416,6 +473,7 @@ class ResearchAgent:
             "technicals": technicals,
             "advanced_technicals": advanced_technicals,
             "fundamentals": fundamentals,
+            "seeking_alpha": sa_intel,
             "risks": risks[:7],
             "opportunities": opportunities[:5],
         }

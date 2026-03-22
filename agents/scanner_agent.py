@@ -290,6 +290,32 @@ class ScannerAgent:
         sma = sum(closes) / len(closes)
         return closes[-1] > sma
 
+    # ── Phase 7d: Intraday Momentum (RSI from daily bars) ──────────
+
+    def _calc_rsi_from_bars(self, bars: list[dict], period: int = 14) -> float | None:
+        """Calculate RSI from a list of daily bar dicts. Returns None if insufficient data."""
+        if len(bars) < period + 1:
+            return None
+
+        closes = [b.get("c", 0) for b in bars]
+        deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+
+        # Use last (period + some buffer) deltas
+        recent = deltas[-(period + 5):]  # slight buffer
+        if len(recent) < period:
+            return None
+
+        gains = [d if d > 0 else 0 for d in recent]
+        losses = [-d if d < 0 else 0 for d in recent]
+
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return round(100 - (100 / (1 + rs)), 1)
+
     # ── Dynamic Sector Watchlist ───────────────────────────────────
 
     def build_sector_watchlist(self) -> list[str]:
@@ -414,10 +440,14 @@ class ScannerAgent:
 
         logger.info(f"Stage 2: {len(passed_filter)} passed price/volume filter")
 
-        # Stage 3: Weekly bars for filtered set + full scoring
-        logger.info("Stage 3: Fetching weekly bars and scoring...")
+        # Stage 3: Weekly + daily bars for filtered set + full scoring
+        logger.info("Stage 3: Fetching weekly/daily bars and scoring...")
         weekly_bars = self.alpaca_data.get_multi_bars(
             passed_filter + ["SPY"], "1Week", days=90,
+        )
+        # Phase 7d: Also fetch daily bars for RSI calculation
+        daily_bars = self.alpaca_data.get_multi_bars(
+            passed_filter, "1Day", days=30,
         )
 
         spy_4w = self._calc_return(weekly_bars.get("SPY", []), weeks=4)
@@ -441,7 +471,11 @@ class ScannerAgent:
             prev_volume = snap.get("prev_volume", 0)
             vol_ratio = volume / prev_volume if prev_volume > 0 else 1.0
 
-            # Composite score (0-100)
+            # Phase 7d: RSI from daily bars
+            db = daily_bars.get(ticker, [])
+            rsi = self._calc_rsi_from_bars(db) if db else None
+
+            # Composite score (0-115 with RSI bonus)
             score = 0.0
             score += max(0, min(30, (rel_strength + 5) * 2))
             if weekly_uptrend:
@@ -452,6 +486,21 @@ class ScannerAgent:
             if daily_change > 0:
                 score += min(15, daily_change * 3)
 
+            # RSI momentum bonus: 0-15 pts
+            # RSI 30-40 (oversold bounce): 15 pts
+            # RSI 40-50 (building momentum): 10 pts
+            # RSI 50-65 (strong momentum, not overbought): 12 pts
+            # RSI > 75 (overbought, risky): -5 pts penalty
+            if rsi is not None:
+                if 30 <= rsi < 40:
+                    score += 15  # Oversold bounce setup
+                elif 40 <= rsi < 50:
+                    score += 10  # Momentum building
+                elif 50 <= rsi <= 65:
+                    score += 12  # Strong momentum zone
+                elif rsi > 75:
+                    score -= 5  # Overbought penalty
+
             scored.append({
                 "ticker": ticker,
                 "score": round(score, 1),
@@ -461,6 +510,7 @@ class ScannerAgent:
                 "daily_change": daily_change,
                 "price": price,
                 "sources": sources,
+                "rsi": rsi,
             })
 
         scored.sort(key=lambda x: x["score"], reverse=True)
@@ -532,6 +582,9 @@ class ScannerAgent:
         weekly_bars = self.alpaca_data.get_multi_bars(
             passed_filter + ["SPY"], "1Week", days=90,
         )
+        daily_bars = self.alpaca_data.get_multi_bars(
+            passed_filter, "1Day", days=30,
+        )
         spy_4w = self._calc_return(weekly_bars.get("SPY", []), weeks=4)
 
         scored = []
@@ -551,6 +604,10 @@ class ScannerAgent:
 
             prev_volume = snap.get("prev_volume", 0)
             vol_ratio = volume / prev_volume if prev_volume > 0 else 1.0
+
+            # Phase 7d: RSI from daily bars
+            db = daily_bars.get(ticker, [])
+            rsi = self._calc_rsi_from_bars(db) if db else None
 
             # Penny scoring: heavier weight on volume spike + daily momentum
             score = 0.0
@@ -573,6 +630,15 @@ class ScannerAgent:
             if daily_change > 0:
                 score += min(25, daily_change * 2.5)
 
+            # RSI momentum bonus for penny stocks: 0-10 pts
+            if rsi is not None:
+                if 25 <= rsi < 40:
+                    score += 10  # Oversold bounce — high value for penny
+                elif 40 <= rsi < 55:
+                    score += 7
+                elif rsi > 80:
+                    score -= 5  # Extremely overbought penny = pump risk
+
             scored.append({
                 "ticker": ticker,
                 "score": round(score, 1),
@@ -582,6 +648,7 @@ class ScannerAgent:
                 "daily_change": daily_change,
                 "price": price,
                 "sources": sources,
+                "rsi": rsi,
             })
 
         scored.sort(key=lambda x: x["score"], reverse=True)
