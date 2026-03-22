@@ -38,6 +38,7 @@ else
     print_status "Starting trading bot..."
     nohup "$PYTHON" main.py >> "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
+    chmod 600 "$PIDFILE" "$LOG" 2>/dev/null
     print_status "Trading bot started (PID $!)"
 fi
 
@@ -52,6 +53,7 @@ else
         --browser.gatherUsageStats false \
         >> "$DIR/dashboard.log" 2>&1 &
     echo $! > "$DASHBOARD_PIDFILE"
+    chmod 600 "$DASHBOARD_PIDFILE" "$DIR/dashboard.log" 2>/dev/null
     print_status "Dashboard started (PID $!)"
 fi
 

@@ -322,9 +322,59 @@ GAP_RISK_POSITION_REDUCTION=0.5  # Cut position 50% for high gap risk
 # Obsidian Integration (v3.0)
 OBSIDIAN_VAULT_PATH=~/Documents/RHVault/RHVault
 OBSIDIAN_SA_MAX_AGE_DAYS=7
+
+# Claude AI Analysis (v3.0)
+CLAUDE_ANALYSIS_ENABLED=true        # Enable/disable LLM analysis
+CLAUDE_MODEL=claude-haiku-4-5-20251001  # Model for per-ticker calls
 </pre>
 
-<h2>10. Quick Start</h2>
+<div class="page-break"></div>
+
+<h2>10. Claude AI Analysis Layer (v3.0)</h2>
+
+<div class="info">
+<strong>Optional:</strong> When an Anthropic API key is configured, Claude provides qualitative judgment
+on every trade setup — catching what rule-based scoring misses.
+</div>
+
+<table>
+<tr><th>Capability</th><th>What It Catches</th></tr>
+<tr><td>News Interpretation</td><td>Sarcastic headlines, misleading sentiment, one-time events that VADER misscores</td></tr>
+<tr><td>Signal Independence</td><td>When "3 edges firing" are actually correlated (all driven by same catalyst)</td></tr>
+<tr><td>Earnings Quality</td><td>Sustainable growth vs accounting tricks, one-time beats</td></tr>
+<tr><td>Risk Synthesis</td><td>Connecting multiple risk factors into a coherent narrative</td></tr>
+<tr><td>Contrarian Reasoning</td><td>Qualitative pushback beyond template contrarian views</td></tr>
+</table>
+
+<h3>10.1 How It Works</h3>
+<p>Claude receives the full research report + rule-based analysis, then returns:</p>
+<table>
+<tr><th>Field</th><th>Range</th><th>Effect</th></tr>
+<tr><td>conviction_adjustment</td><td>-2.0 to +2.0</td><td>Scaled by confidence, added to rule-based conviction</td></tr>
+<tr><td>action_override</td><td>BUY/SELL/HOLD/null</td><td>Only applied at 80%+ confidence</td></tr>
+<tr><td>confidence</td><td>0 to 1</td><td>Scales the conviction adjustment (low confidence = small impact)</td></tr>
+</table>
+
+<h3>10.2 Cost</h3>
+<p>Uses Claude Haiku by default (~$0.001 per ticker analysis). At 20 tickers per cycle,
+that's ~$0.02/hour or ~$0.30/day during market hours.</p>
+
+<h2>11. Security Hardening (v3.0)</h2>
+
+<table>
+<tr><th>Area</th><th>Protection</th></tr>
+<tr><td>API Keys</td><td>macOS Keychain (not in code or .env)</td></tr>
+<tr><td>Database</td><td>File permissions 600 (owner-only), set on creation</td></tr>
+<tr><td>Log Files</td><td>Permissions 600, rotating (10MB max, 5 backups)</td></tr>
+<tr><td>PID Files</td><td>Permissions 600, created atomically</td></tr>
+<tr><td>Obsidian Vault</td><td>Path traversal blocked via realpath() validation</td></tr>
+<tr><td>YAML Parsing</td><td>safe_load() only, 1MB file size limit</td></tr>
+<tr><td>SQL Queries</td><td>Parameterized throughout (no string interpolation)</td></tr>
+<tr><td>Network</td><td>HTTPS on all external APIs, TLS cert validation</td></tr>
+<tr><td>.env File</td><td>Gitignored, never committed</td></tr>
+</table>
+
+<h2>12. Quick Start</h2>
 
 <pre>
 git clone https://github.com/RebelHawk-TK/DeepThinkTrader.git
@@ -340,28 +390,33 @@ streamlit run dashboard.py    # Launch dashboard
 ./stop.sh                     # Stop everything
 </pre>
 
-<h2>11. Project Structure</h2>
+<h2>13. Project Structure</h2>
 <pre>
 StockTrader/
-├── main.py                    # Orchestrator (scheduled loop + 5-min exit checks)
-├── config.py                  # Environment config (3 modes + 20 risk params)
-├── dashboard.py               # Streamlit monitoring + strategy health
-├── run.sh / stop.sh / status.sh  # Control scripts
+├── main.py                    # Orchestrator (log rotation + scheduled loop)
+├── config.py                  # Environment config (3 modes + 25 risk params)
+├── dashboard.py               # Streamlit (ticker bar + benchmarks + health)
+├── run.sh / stop.sh / status.sh  # Control scripts (secure PID/log perms)
+├── install.sh                 # macOS installer (venv + apps)
+├── DeepThinkTrader.app/       # macOS app — double-click to start
+├── DeepThinkTrader Stop.app/  # macOS app — double-click to stop
 ├── agents/
-│   ├── deepthink_agent.py     # Rule-based analysis + multi-edge validation
-│   ├── execution_agent.py     # Alpaca trades + trailing stops + scale-out
-│   ├── research_agent.py      # Multi-source data gathering
-│   └── scanner_agent.py       # 3-stage discovery (main + penny)
+│   ├── deepthink_agent.py     # Rule-based + Claude AI + edge learning
+│   ├── execution_agent.py     # Alpaca trades + 15 safety checks
+│   ├── research_agent.py      # 7 data sources (Alpaca/12Data/News/Reddit/Yahoo/SA RSS/Obsidian)
+│   └── scanner_agent.py       # RSI-scored 3-stage discovery (main + penny)
 ├── utils/
 │   ├── alpaca_data.py         # Alpaca market data + X-Request-ID
-│   ├── database.py            # SQLite (trades, ATR history, slippage, edge perf)
+│   ├── claude_analyst.py      # Claude AI qualitative analysis layer
+│   ├── database.py            # SQLite (9 tables, 600 perms, parameterized queries)
 │   ├── market_clock.py        # Alpaca market clock API + timezone handling
-│   ├── obsidian_seeking_alpha.py  # Seeking Alpha email parser from Obsidian vault
-│   ├── risk_manager.py        # Kelly sizing + 15 pre-trade checks + sector rotation
+│   ├── obsidian_seeking_alpha.py  # SA email parser (path traversal protected)
+│   ├── risk_manager.py        # Kelly sizing + 15 checks + sector rotation
+│   ├── seeking_alpha_rss.py   # SA RSS feeds (main + breakfast + dividends + per-ticker)
 │   ├── twelve_data.py         # MACD, Bollinger, EMA, Stochastic, ADX, ATR
 │   └── yahoo_fundamentals.py  # Fundamentals, earnings calendar, edge scoring
-├── .env.template              # API key template
-├── requirements.txt           # Python dependencies
+├── .env.template              # API key template (gitignored secrets in Keychain)
+├── requirements.txt           # Python dependencies (14 packages)
 └── docs/                      # Documentation + PDF guides
 </pre>
 

@@ -11,6 +11,12 @@ class Database:
     def __init__(self, db_path: str = Config.DB_PATH):
         self.db_path = db_path
         self._init_tables()
+        # Security: restrict database file permissions to owner only
+        try:
+            import os
+            os.chmod(self.db_path, 0o600)
+        except OSError:
+            pass
 
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
