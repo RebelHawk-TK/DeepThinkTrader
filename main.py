@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import logging.handlers
+import os
 import sys
 import time
 from datetime import datetime
@@ -17,13 +19,24 @@ from config import Config
 from utils.database import Database
 from utils.market_clock import get_market_clock
 
-# Configure logging
+# Configure logging with rotation (10MB max, 5 backups)
+_log_file = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
+_file_handler = logging.handlers.RotatingFileHandler(
+    _log_file, maxBytes=10 * 1024 * 1024, backupCount=5,
+)
+_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+# Set restrictive permissions on log file
+try:
+    os.chmod(_log_file, 0o600)
+except OSError:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("deepthinktrader.log"),
+        _file_handler,
     ],
 )
 logger = logging.getLogger("DeepThinkTrader")

@@ -50,12 +50,17 @@ class ObsidianSeekingAlpha:
 
         sa_files = []
         cutoff = datetime.now() - timedelta(days=self.max_age_days)
+        real_email_dir = os.path.realpath(email_dir)
 
         for root, _, files in os.walk(email_dir):
             for fname in files:
                 if not fname.endswith(".md"):
                     continue
                 fpath = os.path.join(root, fname)
+                # Security: prevent path traversal outside the vault
+                if not os.path.realpath(fpath).startswith(real_email_dir):
+                    logger.warning(f"Path traversal blocked: {fpath}")
+                    continue
                 try:
                     front = self._read_frontmatter(fpath)
                     if not front:
@@ -77,6 +82,10 @@ class ObsidianSeekingAlpha:
 
     def _read_frontmatter(self, filepath: str) -> dict | None:
         """Read YAML frontmatter from a markdown file."""
+        # Security: reject files larger than 1MB to prevent memory exhaustion
+        if os.path.getsize(filepath) > 1_000_000:
+            logger.warning(f"File too large, skipping: {filepath}")
+            return None
         with open(filepath, "r", encoding="utf-8") as f:
             content = f.read(2000)  # frontmatter is at the top
         if not content.startswith("---"):
