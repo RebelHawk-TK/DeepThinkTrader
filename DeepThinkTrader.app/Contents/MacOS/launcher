@@ -1,0 +1,16 @@
+#!/bin/bash
+# DeepThinkTrader — macOS App Launcher
+# Runs the start script outside of the app sandbox via Terminal.
+
+DIR="/Users/rebelhawk/Documents/Claude/StockTrader"
+
+osascript << 'APPLEOF'
+tell application "Terminal"
+    set alreadyRunning to (count of windows) > 0
+    do script "bash /Users/rebelhawk/Documents/Claude/StockTrader/run.sh && exit"
+    delay 4
+    if not alreadyRunning then
+        quit
+    end if
+end tell
+APPLEOF
