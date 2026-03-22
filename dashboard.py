@@ -19,6 +19,82 @@ from utils.database import Database
 
 st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="wide")
 
+# ── Market Ticker Bar ──────────────────────────────────────
+@st.cache_data(ttl=60)
+def _fetch_ticker_bar_data():
+    """Fetch quotes for the scrolling market ticker bar."""
+    import yfinance as yf
+    symbols = {
+        "^DJI": "DOW",
+        "^GSPC": "S&P 500",
+        "^IXIC": "NASDAQ",
+        "SI=F": "SILVER",
+        "GC=F": "GOLD",
+        "BTC-USD": "BTC",
+    }
+    items = []
+    for sym, label in symbols.items():
+        try:
+            t = yf.Ticker(sym)
+            hist = t.history(period="5d")
+            if len(hist) >= 2:
+                price = hist["Close"].iloc[-1]
+                prev = hist["Close"].iloc[-2]
+                change = ((price - prev) / prev) * 100
+            elif len(hist) == 1:
+                price = hist["Close"].iloc[-1]
+                change = 0.0
+            else:
+                continue
+            if price > 10000:
+                fmt = f"{price:,.0f}"
+            elif price > 100:
+                fmt = f"{price:,.2f}"
+            else:
+                fmt = f"{price:.2f}"
+            color = "#4caf50" if change >= 0 else "#f44336"
+            arrow = "▲" if change >= 0 else "▼"
+            items.append(
+                f'<span style="color:#e0e0e0;font-weight:600">{label}</span>&nbsp;'
+                f'<span style="color:{color}">${fmt} {arrow} {abs(change):.2f}%</span>'
+            )
+        except Exception:
+            pass
+    return items
+
+_ticker_items = _fetch_ticker_bar_data()
+if _ticker_items:
+    _sep = '&nbsp;&nbsp;&nbsp;·&nbsp;&nbsp;&nbsp;'
+    # Duplicate items so the scroll loops seamlessly
+    _content = _sep.join(_ticker_items)
+    _scroll = _content + _sep + _content
+    st.markdown(f"""
+    <style>
+    .ticker-wrap {{
+        width: 100%;
+        overflow: hidden;
+        background: #1a1a2e;
+        border-radius: 6px;
+        padding: 8px 0;
+        margin-bottom: 12px;
+    }}
+    .ticker-move {{
+        display: inline-block;
+        white-space: nowrap;
+        animation: ticker-scroll 30s linear infinite;
+        font-size: 14px;
+        font-family: 'SF Mono', 'Fira Code', monospace;
+    }}
+    @keyframes ticker-scroll {{
+        0%   {{ transform: translateX(0); }}
+        100% {{ transform: translateX(-50%); }}
+    }}
+    </style>
+    <div class="ticker-wrap">
+        <div class="ticker-move">{_scroll}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
 # Compact metrics so values don't truncate at smaller window widths
 st.markdown("""<style>
 [data-testid="stMetric"] {
@@ -490,6 +566,164 @@ if _trades_with_edges:
             rate = f"{passed}/{total}" if total > 0 else "—"
             edge_rates.append(f"{lbl[:4]}: {rate}")
         st.metric("Edge Breakdown", " | ".join(edge_rates))
+
+st.divider()
+
+# ──────────────────────────────────────────────
+# PERFORMANCE vs BENCHMARKS
+# ──────────────────────────────────────────────
+
+st.subheader("Performance vs Market Benchmarks")
+
+_PERIOD_OPTIONS = {
+    "1 D": ("1d", "1D"),
+    "5 D": ("5d", "5D"),
+    "30 D": ("1mo", "30D"),
+    "90 D": ("3mo", "90D"),
+    "180 D": ("6mo", "180D"),
+    "1 Y": ("1y", "1Y"),
+    "3 Y": ("3y", "3Y"),
+}
+_ALPACA_PERIOD_MAP = {
+    "1 D": "1D", "5 D": "1W", "30 D": "1M", "90 D": "3M",
+    "180 D": "6M", "1 Y": "1A", "3 Y": "3A",
+}
+
+_bench_period = st.segmented_control(
+    "Period",
+    options=list(_PERIOD_OPTIONS.keys()),
+    default="90 D",
+    key="bench_period",
+)
+if not _bench_period:
+    _bench_period = "90 D"
+
+_yf_period, _display_period = _PERIOD_OPTIONS[_bench_period]
+
+@st.cache_data(ttl=120)
+def _get_benchmark_data(yf_period: str):
+    """Fetch index performance for comparison chart."""
+    import yfinance as yf
+
+    benchmarks = {"^DJI": "Dow Jones", "^GSPC": "S&P 500", "^IXIC": "Nasdaq"}
+    series = {}
+
+    for sym, label in benchmarks.items():
+        try:
+            hist = yf.Ticker(sym).history(period=yf_period)
+            if not hist.empty:
+                closes = hist["Close"]
+                base = closes.iloc[0]
+                pct = ((closes - base) / base) * 100
+                series[label] = pct
+        except Exception:
+            pass
+
+    return series
+
+@st.cache_data(ttl=60)
+def _get_portfolio_history_period(alpaca_period: str):
+    """Fetch bot portfolio history for the selected period."""
+    try:
+        tf = "1D" if alpaca_period not in ("1D",) else "15Min"
+        resp = http_requests.get(
+            f"{config.ALPACA_BASE_URL}/v2/account/portfolio/history",
+            headers=ALPACA_HEADERS,
+            params={
+                "period": alpaca_period,
+                "timeframe": tf,
+                "intraday_reporting": "market_hours",
+                "pnl_reset": "per_day",
+            },
+            timeout=10,
+        )
+        if resp.ok:
+            data = resp.json()
+            if data.get("equity"):
+                ts = data["timestamp"]
+                eq = data["equity"]
+                pnl = data.get("profit_loss", [0] * len(eq))
+                fts, feq, fpnl = [], [], []
+                for i, e in enumerate(eq):
+                    if e and e > 0:
+                        fts.append(ts[i])
+                        feq.append(e)
+                        fpnl.append(pnl[i] if i < len(pnl) else 0)
+                data["timestamp"] = fts
+                data["equity"] = feq
+                data["profit_loss"] = fpnl
+            return data
+    except Exception:
+        pass
+    return None
+
+benchmark_data = _get_benchmark_data(_yf_period)
+_port_hist = _get_portfolio_history_period(_ALPACA_PERIOD_MAP[_bench_period])
+
+if _port_hist and _port_hist.get("equity") and benchmark_data:
+    eq = _port_hist["equity"]
+    ts = _port_hist["timestamp"]
+    if eq and ts and eq[0] and eq[0] > 0:
+        bot_base = eq[0]
+        bot_dates = pd.to_datetime(ts, unit="s").tz_localize("UTC").tz_convert("US/Eastern").normalize()
+        bot_pct = [((e - bot_base) / bot_base) * 100 for e in eq]
+
+        fig_bench = go.Figure()
+
+        colors = {"Dow Jones": "#1f77b4", "S&P 500": "#ff7f0e", "Nasdaq": "#2ca02c"}
+        for label, pct_series in benchmark_data.items():
+            start = bot_dates.min()
+            mask = pct_series.index >= start
+            if mask.any():
+                aligned = pct_series[mask]
+                if len(aligned) > 0:
+                    aligned = aligned - aligned.iloc[0]
+                fig_bench.add_trace(go.Scatter(
+                    x=aligned.index,
+                    y=aligned.values,
+                    name=label,
+                    line=dict(color=colors.get(label, "#999"), width=2, dash="dot"),
+                    opacity=0.8,
+                ))
+
+        fig_bench.add_trace(go.Scatter(
+            x=bot_dates,
+            y=bot_pct,
+            name="DeepThinkTrader",
+            line=dict(color="#e040fb", width=3),
+        ))
+
+        fig_bench.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
+
+        fig_bench.update_layout(
+            title=None,
+            yaxis_title="Return %",
+            xaxis_title=None,
+            height=400,
+            template="plotly_dark",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+            margin=dict(l=40, r=20, t=10, b=40),
+            hovermode="x unified",
+        )
+        st.plotly_chart(fig_bench, use_container_width=True)
+
+        # Summary metrics
+        bcols = st.columns(4)
+        bot_return = bot_pct[-1] if bot_pct else 0
+        bcols[0].metric("DeepThinkTrader", f"{bot_return:+.2f}%")
+        for i, (label, pct_series) in enumerate(benchmark_data.items()):
+            if i < 3:
+                start = bot_dates.min()
+                mask = pct_series.index >= start
+                if mask.any():
+                    aligned = pct_series[mask]
+                    bench_return = (aligned.iloc[-1] - aligned.iloc[0]) if len(aligned) > 0 else 0
+                    delta = bot_return - bench_return
+                    bcols[i + 1].metric(label, f"{bench_return:+.2f}%", delta=f"{delta:+.2f}% vs bot")
+    else:
+        st.info("Waiting for portfolio equity history to build (need at least 2 data points).")
+else:
+    st.info("Portfolio history or benchmark data unavailable.")
 
 st.divider()
 
