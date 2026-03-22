@@ -18,6 +18,7 @@ from config import Config
 from utils.alpaca_data import AlpacaMarketData
 from utils.database import Database
 from utils.obsidian_seeking_alpha import ObsidianSeekingAlpha
+from utils.seeking_alpha_rss import SeekingAlphaRSS
 from utils.twelve_data import TwelveData
 from utils.yahoo_fundamentals import YahooFundamentals
 
@@ -35,6 +36,7 @@ class ResearchAgent:
             vault_path=self.config.OBSIDIAN_VAULT_PATH,
             max_age_days=self.config.OBSIDIAN_SA_MAX_AGE_DAYS,
         )
+        self.sa_rss = SeekingAlphaRSS()
         self.newsapi = NewsApiClient(api_key=self.config.NEWSAPI_KEY)
         self.vader = SentimentIntensityAnalyzer()
 
@@ -235,12 +237,50 @@ class ResearchAgent:
         except Exception as e:
             logger.error(f"Yahoo fundamentals error for {ticker}: {e}")
 
-        # Fetch Seeking Alpha intelligence from Obsidian
+        # Fetch Seeking Alpha intelligence from Obsidian emails
         sa_intel = {}
         try:
             sa_intel = self.obsidian_sa.get_ticker_intel(ticker)
         except Exception as e:
             logger.error(f"Obsidian SA error for {ticker}: {e}")
+
+        # Fetch Seeking Alpha RSS feed data (articles + news)
+        sa_rss_intel = {}
+        try:
+            sa_rss_intel = self.sa_rss.get_ticker_intel(ticker)
+            if sa_rss_intel.get("article_count", 0) > 0:
+                logger.info(
+                    f"SA RSS for {ticker}: {sa_rss_intel['article_count']} articles, "
+                    f"sentiment={sa_rss_intel['avg_sentiment']:+.3f}, "
+                    f"bull/bear={sa_rss_intel['bullish_count']}/{sa_rss_intel['bearish_count']}"
+                )
+        except Exception as e:
+            logger.error(f"SA RSS error for {ticker}: {e}")
+
+        # Merge Obsidian + RSS SA intel — RSS takes priority for sentiment (more data)
+        if sa_rss_intel.get("article_count", 0) > 0:
+            # Combine: use RSS sentiment if available (more articles = better signal)
+            rss_sent = sa_rss_intel.get("avg_sentiment", 0)
+            obs_sent = sa_intel.get("avg_sentiment", 0)
+            if sa_intel.get("mentioned") and abs(obs_sent) > 0:
+                # Weighted average: RSS 70%, Obsidian 30% (RSS has more data)
+                combined_sa_sent = rss_sent * 0.7 + obs_sent * 0.3
+            else:
+                combined_sa_sent = rss_sent
+            sa_intel = {
+                **sa_intel,
+                "mentioned": True,
+                "avg_sentiment": round(combined_sa_sent, 3),
+                "categories": sorted(set(
+                    sa_intel.get("categories", []) + sa_rss_intel.get("categories", [])
+                )),
+                "mention_count": (
+                    sa_intel.get("mention_count", 0) + sa_rss_intel.get("article_count", 0)
+                ),
+                "rss_articles": sa_rss_intel.get("articles", [])[:5],
+                "rss_bullish": sa_rss_intel.get("bullish_count", 0),
+                "rss_bearish": sa_rss_intel.get("bearish_count", 0),
+            }
 
         # Calculate combined scores
         news_impact = (
