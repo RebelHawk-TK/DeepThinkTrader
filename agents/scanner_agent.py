@@ -411,6 +411,18 @@ class ScannerAgent:
         discovery_candidates.extend(self._discover_top_movers())
         discovery_candidates.extend(self._discover_news_trending())
 
+        # SA RSS trending tickers get discovery bonus
+        try:
+            from utils.seeking_alpha_rss import SeekingAlphaRSS
+            sa_rss = SeekingAlphaRSS()
+            sa_trending = sa_rss.get_trending_tickers(min_mentions=2)
+            for t in sa_trending:
+                discovery_candidates.append({"ticker": t["ticker"], "source": "sa_rss"})
+            if sa_trending:
+                logger.info(f"Scanner: {len(sa_trending)} SA RSS trending tickers added")
+        except Exception as e:
+            logger.debug(f"SA RSS scanner bonus failed: {e}")
+
         source_counts: dict[str, int] = Counter()
         for c in discovery_candidates:
             source_counts[c["ticker"]] += 1
