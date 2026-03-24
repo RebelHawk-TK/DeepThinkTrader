@@ -142,7 +142,7 @@ Trading bots can lose 100% of capital. This project is educational and experimen
 
 <div class="page-break"></div>
 
-<h2>3. Risk Management (15 Pre-Trade Checks)</h2>
+<h2>3. Risk Management (16 Pre-Trade Checks)</h2>
 
 <div class="info">
 These safety checks run BEFORE every trade and cannot be overridden via configuration.
@@ -150,6 +150,7 @@ These safety checks run BEFORE every trade and cannot be overridden via configur
 
 <table>
 <tr><th>#</th><th>Check</th><th>Action if Failed</th></tr>
+<tr><td>0</td><td>Warmup complete (200+ unique tickers analyzed)</td><td>BLOCKED until warmup done</td></tr>
 <tr><td>1</td><td>Conviction meets threshold</td><td>HOLD</td></tr>
 <tr><td>2</td><td>Risk within limit</td><td>BLOCKED</td></tr>
 <tr><td>3</td><td>Reward:Risk ratio acceptable</td><td>BLOCKED</td></tr>

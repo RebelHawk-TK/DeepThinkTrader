@@ -86,9 +86,10 @@ and execution quality validation (spread, VIX, sector, gap risk).
 </table>
 <p>Where p = win rate, q = 1 - p, b = avg win / avg loss (payoff ratio). Capped at MAX_POSITION_PCT.</p>
 
-<h3>3.2 Pre-Trade Checks (15 gates)</h3>
+<h3>3.2 Pre-Trade Checks (16 gates)</h3>
 <table>
 <tr><th>#</th><th>Check</th><th>Action if Failed</th></tr>
+<tr><td>0</td><td>Warmup complete (200+ unique tickers analyzed)</td><td>BLOCKED (all trades until warmup done)</td></tr>
 <tr><td>1</td><td>Conviction meets threshold</td><td>HOLD</td></tr>
 <tr><td>2</td><td>Risk within limit</td><td>BLOCKED</td></tr>
 <tr><td>3</td><td>Reward:Risk ratio acceptable</td><td>BLOCKED</td></tr>

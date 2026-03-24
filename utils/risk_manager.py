@@ -480,6 +480,34 @@ class RiskManager:
 
     # ── Original methods (preserved) ──────────────────────────────
 
+    # ── Warmup Gate ──────────────────────────────────────────────
+
+    def check_warmup_complete(self) -> bool:
+        """Return True if enough unique tickers have been analyzed to start trading.
+
+        Blocks all execution until WARMUP_MIN_TICKERS unique tickers have been
+        analyzed in the current session (since last DB reset). This ensures the
+        bot has surveyed the full market before committing capital.
+        """
+        min_tickers = self.config.WARMUP_MIN_TICKERS
+        if min_tickers <= 0:
+            return True  # Warmup disabled
+
+        with self.db._get_conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT ticker) as n FROM analysis_results"
+            ).fetchone()
+        analyzed = row["n"] if row else 0
+
+        if analyzed < min_tickers:
+            logger.info(
+                f"WARMUP: {analyzed}/{min_tickers} unique tickers analyzed — "
+                f"execution blocked until warmup complete"
+            )
+            return False
+
+        return True
+
     def check_daily_loss_limit(self, account_value: float) -> bool:
         """Return True if we're still within daily loss limit."""
         today_pnl = self.db.get_today_pnl()
@@ -523,6 +551,7 @@ class RiskManager:
         params = self._get_params(portfolio)
         entry_value = entry_price * proposed_shares if entry_price > 0 else 0
         checks = {
+            "warmup_complete": self.check_warmup_complete(),
             "conviction_met": conviction >= params["min_conviction"],
             "risk_within_limit": stop_loss_pct <= (params["max_risk_per_trade"] * 100 * 5),
             "reward_risk_ok": (

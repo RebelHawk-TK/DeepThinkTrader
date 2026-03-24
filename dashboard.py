@@ -233,9 +233,6 @@ if st.sidebar.button("Refresh Now"):
     st.cache_data.clear()
     st.rerun()
 
-if auto_refresh:
-    st.cache_data.clear()
-
 st.sidebar.markdown("---")
 
 # === TRADE MODE SWITCHER ===
@@ -1537,11 +1534,11 @@ with st.expander("Alpaca API Request IDs (debugging)"):
 
 # Footer
 st.divider()
-st.caption("DeepThinkTrader v2.0 — Paper Trading Mode | Risk-First Framework | Dashboard auto-refreshes on Streamlit file change")
+st.caption("DeepThinkTrader v3.0 — Paper Trading Mode | Risk-First Framework + Claude AI Analysis")
 
-# Auto-refresh: sleep AFTER all content is rendered, then rerun
+# Auto-refresh using st.fragment for non-blocking periodic rerun
 if auto_refresh:
-    import time as _time
-    _time.sleep(refresh_interval)
-    st.query_params["ri"] = str(refresh_interval)
-    st.rerun()
+    @st.fragment(run_every=refresh_interval)
+    def _auto_refresh():
+        st.cache_data.clear()
+    _auto_refresh()

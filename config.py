@@ -140,6 +140,9 @@ class Config:
     # ── Phase 3: Edge Validation ──────────────────────────────────
     MIN_EDGES_REQUIRED: int = int(os.getenv("MIN_EDGES_REQUIRED", "2"))
 
+    # ── Warmup: analyze N unique tickers before first trade ─────
+    WARMUP_MIN_TICKERS: int = int(os.getenv("WARMUP_MIN_TICKERS", "200"))
+
     # ── Phase 4: Smart Orders ─────────────────────────────────────
     PENNY_LIMIT_SLIPPAGE_PCT: float = float(os.getenv("PENNY_LIMIT_SLIPPAGE_PCT", "0.5"))
     MAX_SLIPPAGE_PCT: float = float(os.getenv("MAX_SLIPPAGE_PCT", "0.3"))
