@@ -382,11 +382,17 @@ def get_portfolio_history():
                 else:
                     baseline_ts = 0
                 fts, feq, fpnl = [], [], []
+                prev_eq = None
                 for i, e in enumerate(eq):
                     if e and e > 0 and ts[i] >= baseline_ts:
+                        # Skip settlement artifacts: equity drops >40% in one bar
+                        # then recovers (cash-only snapshots between sell/buy cycles)
+                        if prev_eq and e < prev_eq * 0.6:
+                            continue
                         fts.append(ts[i])
                         feq.append(e)
                         fpnl.append(pnl[i] if i < len(pnl) else 0)
+                        prev_eq = e
                 data["timestamp"] = fts
                 data["equity"] = feq
                 data["profit_loss"] = fpnl
@@ -896,11 +902,17 @@ def _get_portfolio_history_period(alpaca_period: str):
                 else:
                     baseline_ts = 0
                 fts, feq, fpnl = [], [], []
+                prev_eq = None
                 for i, e in enumerate(eq):
                     if e and e > 0 and ts[i] >= baseline_ts:
+                        # Skip settlement artifacts: equity drops >40% in one bar
+                        # then recovers (cash-only snapshots between sell/buy cycles)
+                        if prev_eq and e < prev_eq * 0.6:
+                            continue
                         fts.append(ts[i])
                         feq.append(e)
                         fpnl.append(pnl[i] if i < len(pnl) else 0)
+                        prev_eq = e
                 data["timestamp"] = fts
                 data["equity"] = feq
                 data["profit_loss"] = fpnl
