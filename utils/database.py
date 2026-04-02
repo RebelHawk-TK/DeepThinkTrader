@@ -169,7 +169,7 @@ class Database:
             )
 
     def get_median_atr(self, ticker: str, days: int = 30) -> float:
-        """Get median ATR from stored history. Returns 0 if insufficient data."""
+        """Get median ATR from stored history. Seeds from yfinance if insufficient data."""
         with self._get_conn() as conn:
             from datetime import timedelta
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -179,6 +179,19 @@ class Database:
                    ORDER BY date""",
                 (ticker, cutoff),
             ).fetchall()
+
+        if len(rows) < 5:
+            # Seed historical ATR from yfinance
+            self._seed_atr_history(ticker)
+            # Re-query after seeding
+            with self._get_conn() as conn:
+                rows = conn.execute(
+                    """SELECT atr_value FROM atr_history
+                       WHERE ticker = ? AND date >= ?
+                       ORDER BY date""",
+                    (ticker, cutoff),
+                ).fetchall()
+
         if len(rows) < 5:
             return 0.0
         values = sorted(r["atr_value"] for r in rows)
@@ -186,6 +199,48 @@ class Database:
         if len(values) % 2 == 0:
             return (values[mid - 1] + values[mid]) / 2
         return values[mid]
+
+    def _seed_atr_history(self, ticker: str, period: str = "3mo") -> None:
+        """Seed ATR history from yfinance for accurate median on first encounter."""
+        try:
+            import yfinance as yf
+            import numpy as np
+
+            hist = yf.Ticker(ticker).history(period=period)
+            if hist.empty or len(hist) < 15:
+                return
+
+            high = hist["High"].values
+            low = hist["Low"].values
+            close = hist["Close"].values
+
+            # True Range calculation
+            tr = np.maximum(
+                high[1:] - low[1:],
+                np.maximum(
+                    np.abs(high[1:] - close[:-1]),
+                    np.abs(low[1:] - close[:-1]),
+                ),
+            )
+
+            # 14-day ATR rolling average
+            atr_period = 14
+            if len(tr) < atr_period:
+                return
+
+            dates = hist.index[atr_period:]
+            with self._get_conn() as conn:
+                for i in range(atr_period, len(tr)):
+                    atr_val = float(np.mean(tr[i - atr_period:i]))
+                    date_str = dates[i - atr_period].strftime("%Y-%m-%d")
+                    conn.execute(
+                        """INSERT OR IGNORE INTO atr_history (ticker, date, atr_value)
+                           VALUES (?, ?, ?)""",
+                        (ticker, date_str, atr_val),
+                    )
+            log.info(f"Seeded {len(dates)} ATR values for {ticker} from yfinance")
+        except Exception as e:
+            log.warning(f"Failed to seed ATR history for {ticker}: {e}")
 
     def _init_slippage_table(self, conn: sqlite3.Connection) -> None:
         """Create slippage_records table for tracking fill quality."""

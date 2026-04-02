@@ -19,6 +19,133 @@ from utils.database import Database
 
 st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="wide")
 
+# ── Global Theme & CSS ──────────────────────────────────────
+st.markdown("""<style>
+/* === Card containers === */
+.kpi-card {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+    border: 1px solid #2a2a4a;
+    border-radius: 12px;
+    padding: 20px 16px 16px;
+    margin-bottom: 12px;
+}
+.kpi-card-green {
+    background: linear-gradient(135deg, #0a2e1a 0%, #0e3e20 100%);
+    border: 1px solid #1a5a30;
+    border-radius: 12px;
+    padding: 20px 16px 16px;
+    margin-bottom: 12px;
+}
+.kpi-card-red {
+    background: linear-gradient(135deg, #2e1a1a 0%, #3e1616 100%);
+    border: 1px solid #5a1a1a;
+    border-radius: 12px;
+    padding: 20px 16px 16px;
+    margin-bottom: 12px;
+}
+.kpi-card-amber {
+    background: linear-gradient(135deg, #2e2a1a 0%, #3e3216 100%);
+    border: 1px solid #5a4a1a;
+    border-radius: 12px;
+    padding: 20px 16px 16px;
+    margin-bottom: 12px;
+}
+
+/* === Section headers === */
+.section-header {
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: #8892b0;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    margin: 24px 0 12px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid #2a2a4a;
+}
+
+/* === Status banner === */
+.status-banner {
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 14px;
+    text-align: center;
+    margin-bottom: 16px;
+}
+.status-active {
+    background: #0a2e1a;
+    border: 1px solid #1a5a30;
+    color: #4caf50;
+}
+.status-paused {
+    background: #2e1a1a;
+    border: 1px solid #5a1a1a;
+    color: #f44336;
+}
+
+/* === Metric styling overrides === */
+[data-testid="stMetric"] {
+    overflow: hidden;
+}
+[data-testid="stMetricValue"] {
+    font-size: clamp(1rem, 2.2vw, 1.8rem);
+    white-space: nowrap;
+    font-weight: 700;
+}
+[data-testid="stMetricLabel"] {
+    font-size: clamp(0.65rem, 1.2vw, 0.85rem);
+    color: #8892b0 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+[data-testid="stMetricDelta"] {
+    font-size: clamp(0.6rem, 1vw, 0.8rem);
+}
+
+/* === Title === */
+h1 { font-size: clamp(1.4rem, 3vw, 2.2rem) !important; }
+
+/* === Subheaders with accent === */
+h2, h3 {
+    color: #ccd6f6 !important;
+}
+
+/* === Dividers === */
+hr {
+    border-color: #2a2a4a !important;
+    margin: 20px 0 !important;
+}
+
+/* === Expanders === */
+[data-testid="stExpander"] {
+    border: 1px solid #2a2a4a;
+    border-radius: 8px;
+    margin-bottom: 8px;
+}
+
+/* === Dataframe rows: P&L color hint via row hover === */
+.stDataFrame [data-testid="stDataFrameResizable"] {
+    border: 1px solid #2a2a4a;
+    border-radius: 8px;
+}
+
+/* === Sidebar polish === */
+[data-testid="stSidebar"] {
+    background: #0a0a1a;
+}
+[data-testid="stSidebar"] h2 {
+    font-size: 0.95rem !important;
+    color: #8892b0 !important;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* === Tab styling === */
+.stTabs [data-baseweb="tab"] {
+    font-weight: 600;
+}
+</style>""", unsafe_allow_html=True)
+
 # ── Market Ticker Bar ──────────────────────────────────────
 @st.cache_data(ttl=60)
 def _fetch_ticker_bar_data():
@@ -95,27 +222,110 @@ if _ticker_items:
     </div>
     """, unsafe_allow_html=True)
 
-# Compact metrics so values don't truncate at smaller window widths
-st.markdown("""<style>
-[data-testid="stMetric"] {
-    overflow: hidden;
-}
-[data-testid="stMetricValue"] {
-    font-size: clamp(1rem, 2.2vw, 1.8rem);
-    white-space: nowrap;
-}
-[data-testid="stMetricLabel"] {
-    font-size: clamp(0.65rem, 1.2vw, 0.85rem);
-}
-[data-testid="stMetricDelta"] {
-    font-size: clamp(0.6rem, 1vw, 0.8rem);
-}
-h1 { font-size: clamp(1.4rem, 3vw, 2.2rem) !important; }
-</style>""", unsafe_allow_html=True)
 
-st.title("DeepThinkTrader Dashboard")
+# Live clock — runs in browser via JavaScript, syncs to local system time
+import streamlit.components.v1 as _components
+_components.html("""
+<div id="clock-bar" style="
+    display: flex; justify-content: space-between; align-items: center;
+    background: #1a1a2e; border-radius: 6px; padding: 6px 16px; margin-bottom: 8px;
+    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px;
+">
+    <span id="local-time" style="color: #e0e0e0;"></span>
+    <span id="market-status" style="font-weight: 600;"></span>
+    <span id="et-time" style="color: #e0e0e0;"></span>
+</div>
+<script>
+function updateClock() {
+    const now = new Date();
+    const local = now.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:true});
+    const localDate = now.toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'});
+    document.getElementById('local-time').innerHTML = '🕐 ' + localDate + ' ' + local;
+
+    const et = new Date(now.toLocaleString('en-US', {timeZone: 'America/New_York'}));
+    const etTime = et.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:true});
+    document.getElementById('et-time').innerHTML = 'ET: ' + etTime;
+
+    const h = et.getHours(), m = et.getMinutes(), day = et.getDay();
+    const mins = h * 60 + m;
+    const isWeekday = day >= 1 && day <= 5;
+    const isOpen = isWeekday && mins >= 570 && mins < 960; // 9:30-16:00
+
+    const statusEl = document.getElementById('market-status');
+    if (isOpen) {
+        const minsLeft = 960 - mins;
+        const hLeft = Math.floor(minsLeft / 60);
+        const mLeft = minsLeft % 60;
+        statusEl.innerHTML = '🟢 MARKET OPEN — ' + hLeft + 'h ' + mLeft + 'm left';
+        statusEl.style.color = '#4caf50';
+    } else {
+        let nextOpen;
+        if (!isWeekday || mins >= 960) {
+            let daysUntil = 1;
+            let next = new Date(et);
+            next.setDate(next.getDate() + 1);
+            while (next.getDay() === 0 || next.getDay() === 6) { next.setDate(next.getDate() + 1); daysUntil++; }
+            nextOpen = daysUntil === 1 ? 'tomorrow' : daysUntil + ' days';
+        } else {
+            const minsUntil = 570 - mins;
+            const hU = Math.floor(minsUntil / 60);
+            const mU = minsUntil % 60;
+            nextOpen = hU + 'h ' + mU + 'm';
+        }
+        statusEl.innerHTML = '🔴 MARKET CLOSED — opens in ' + nextOpen;
+        statusEl.style.color = '#f44336';
+    }
+}
+updateClock();
+setInterval(updateClock, 1000);
+</script>
+""", height=40)
+
+# Branded header
+st.markdown("""
+<div style="display:flex; align-items:center; gap:16px; margin-bottom:4px;">
+    <span style="font-size:2rem;">📈</span>
+    <div>
+        <div style="font-size:1.8rem; font-weight:800; color:#ccd6f6; letter-spacing:-0.5px;">
+            DeepThinkTrader
+        </div>
+        <div style="font-size:0.85rem; color:#8892b0; font-style:italic;">
+            Trade with conviction, not emotion.
+        </div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 YAHOO_URL = "https://finance.yahoo.com/quote"
+
+# Chart theme constants
+CHART_COLORS = {
+    "primary": "#6c63ff",
+    "secondary": "#00d4aa",
+    "positive": "#4caf50",
+    "negative": "#f44336",
+    "neutral": "#8892b0",
+    "accent": "#ffd700",
+    "bg": "#0e1117",
+    "grid": "#1a1a2e",
+    "text": "#ccd6f6",
+}
+
+CHART_LAYOUT = dict(
+    template="plotly_dark",
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="#0e1117",
+    font=dict(family="'SF Mono', 'Fira Code', monospace", color="#ccd6f6", size=12),
+    xaxis=dict(gridcolor="#1a1a2e", showgrid=True, gridwidth=1),
+    yaxis=dict(gridcolor="#1a1a2e", showgrid=True, gridwidth=1),
+    margin=dict(l=0, r=0, t=30, b=0),
+    legend=dict(bgcolor="rgba(0,0,0,0)"),
+)
+
+def apply_chart_theme(fig):
+    """Apply consistent dark theme to any Plotly figure."""
+    fig.update_layout(**CHART_LAYOUT)
+    return fig
 
 db = Database()
 config = Config()
@@ -164,9 +374,16 @@ def get_portfolio_history():
                 ts = data["timestamp"]
                 eq = data["equity"]
                 pnl = data.get("profit_loss", [0] * len(eq))
+                # Filter to baseline date — ignore all history before reset
+                baseline = config.BASELINE_DATE
+                if baseline:
+                    from datetime import datetime as _dt
+                    baseline_ts = int(_dt.strptime(baseline, "%Y-%m-%d").timestamp())
+                else:
+                    baseline_ts = 0
                 fts, feq, fpnl = [], [], []
                 for i, e in enumerate(eq):
-                    if e and e > 0:
+                    if e and e > 0 and ts[i] >= baseline_ts:
                         fts.append(ts[i])
                         feq.append(e)
                         fpnl.append(pnl[i] if i < len(pnl) else 0)
@@ -316,7 +533,7 @@ if os.path.exists(bot_pid_path):
         pid = int(open(bot_pid_path).read().strip())
         os.kill(pid, 0)  # Check if process exists
         bot_running = True
-    except (ProcessError, ValueError, OSError):
+    except (ProcessLookupError, ValueError, OSError):
         pass
 
 st.sidebar.markdown(f"**Bot:** {'🟢 Running' if bot_running else '🔴 Stopped'}")
@@ -450,45 +667,68 @@ if portfolio_hist and portfolio_hist.get("equity"):
             sortino_ratio = round((mean_ret / downside_std) * np.sqrt(252), 2)
 
 # ──────────────────────────────────────────────
-# TOP METRICS ROW 1 — Portfolio
+# TOP METRICS — Portfolio & Risk in Cards
 # ──────────────────────────────────────────────
 
-col1, col2, col3, col4, col5 = st.columns(5)
+st.markdown('<div class="section-header">Account Overview</div>', unsafe_allow_html=True)
 
-with col1:
-    st.metric(
-        "Portfolio Value",
-        f"${equity:,.2f}",
-        delta=f"${total_pnl:+,.2f}",
-        delta_color="normal" if total_pnl >= 0 else "inverse",
-    )
-with col2:
-    st.metric("Realized P&L", f"${realized_pnl:+,.2f}",
-              delta_color="normal" if realized_pnl >= 0 else "inverse")
-with col3:
-    st.metric("Unrealized P&L", f"${unrealized_pnl:+,.2f}",
-              delta_color="normal" if unrealized_pnl >= 0 else "inverse")
-with col4:
-    st.metric("Cash", f"${cash:,.2f}")
-with col5:
-    st.metric("Total Trades", total_trades)
+_pnl_card = "kpi-card-green" if total_pnl >= 0 else "kpi-card-red"
+_dd_card = "kpi-card-amber" if max_drawdown_pct > 5 else "kpi-card"
 
-# TOP METRICS ROW 2 — Risk (Tier 1 #2)
-rcol1, rcol2, rcol3, rcol4, rcol5 = st.columns(5)
+_card_left, _card_mid, _card_right = st.columns(3)
 
-with rcol1:
-    st.metric("Win Rate", f"{win_rate:.0f}%" if closed_trades else "N/A")
-with rcol2:
-    st.metric("Max Drawdown", f"-{max_drawdown_pct:.1f}%",
-              delta=f"-${max_drawdown_dollars:,.0f}" if max_drawdown_dollars > 0 else "$0",
-              delta_color="normal" if max_drawdown_dollars > 0 else "off")
-with rcol3:
-    color = "normal" if sharpe_ratio > 0 else "inverse"
-    st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
-with rcol4:
-    st.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
-with rcol5:
-    st.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor > 0 else "N/A")
+with _card_left:
+    st.markdown(f'<div class="{_pnl_card}">', unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric(
+            "Portfolio Value",
+            f"${equity:,.2f}",
+            delta=f"${total_pnl:+,.2f}",
+            delta_color="normal" if total_pnl >= 0 else "inverse",
+        )
+    with c2:
+        st.metric("Cash", f"${cash:,.2f}")
+    c3, c4 = st.columns(2)
+    with c3:
+        st.metric("Realized P&L", f"${realized_pnl:+,.2f}",
+                  delta_color="normal" if realized_pnl >= 0 else "inverse")
+    with c4:
+        st.metric("Unrealized P&L", f"${unrealized_pnl:+,.2f}",
+                  delta_color="normal" if unrealized_pnl >= 0 else "inverse")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with _card_mid:
+    _wr_card = "kpi-card-green" if win_rate >= 55 else ("kpi-card-red" if win_rate < 45 and closed_trades else "kpi-card")
+    st.markdown(f'<div class="{_wr_card}">', unsafe_allow_html=True)
+    p1, p2 = st.columns(2)
+    with p1:
+        st.metric("Win Rate", f"{win_rate:.0f}%" if closed_trades else "N/A")
+    with p2:
+        st.metric("Total Trades", total_trades)
+    p3, p4 = st.columns(2)
+    with p3:
+        st.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor > 0 else "N/A")
+    with p4:
+        _expectancy = (avg_win * (win_rate/100) - avg_loss * (1-win_rate/100)) if closed_trades else 0
+        st.metric("Expectancy", f"${_expectancy:+,.2f}" if closed_trades else "N/A")
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with _card_right:
+    st.markdown(f'<div class="{_dd_card}">', unsafe_allow_html=True)
+    r1, r2 = st.columns(2)
+    with r1:
+        st.metric("Max Drawdown", f"-{max_drawdown_pct:.1f}%",
+                  delta=f"-${max_drawdown_dollars:,.0f}" if max_drawdown_dollars > 0 else "$0",
+                  delta_color="normal" if max_drawdown_dollars > 0 else "off")
+    with r2:
+        st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+    r3, r4 = st.columns(2)
+    with r3:
+        st.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
+    with r4:
+        st.metric("Open Positions", len(open_trades_db))
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # TOP METRICS ROW 3 — Rolling Performance (Tier 2 #10)
 if closed_trades:
@@ -564,13 +804,13 @@ if _trades_with_edges:
             edge_rates.append(f"{lbl[:4]}: {rate}")
         st.metric("Edge Breakdown", " | ".join(edge_rates))
 
-st.divider()
+st.markdown("")
 
 # ──────────────────────────────────────────────
 # PERFORMANCE vs BENCHMARKS
 # ──────────────────────────────────────────────
 
-st.subheader("Performance vs Market Benchmarks")
+st.markdown('<div class="section-header">Performance vs Market Benchmarks</div>', unsafe_allow_html=True)
 
 _PERIOD_OPTIONS = {
     "1 D": ("1d", "1D"),
@@ -585,20 +825,25 @@ _ALPACA_PERIOD_MAP = {
     "1 D": "1D", "5 D": "1W", "30 D": "1M", "90 D": "3M",
     "180 D": "6M", "1 Y": "1A", "3 Y": "3A",
 }
+# Intraday timeframes for short periods
+_ALPACA_TF_MAP = {
+    "1 D": "15Min", "5 D": "1H",
+    "30 D": "1D", "90 D": "1D", "180 D": "1D", "1 Y": "1D", "3 Y": "1D",
+}
 
 _bench_period = st.segmented_control(
     "Period",
     options=list(_PERIOD_OPTIONS.keys()),
-    default="90 D",
+    default="5 D",
     key="bench_period",
 )
 if not _bench_period:
-    _bench_period = "90 D"
+    _bench_period = "5 D"
 
 _yf_period, _display_period = _PERIOD_OPTIONS[_bench_period]
 
 @st.cache_data(ttl=120)
-def _get_benchmark_data(yf_period: str):
+def _get_benchmark_data(yf_period: str, intraday: bool = False):
     """Fetch index performance for comparison chart."""
     import yfinance as yf
 
@@ -607,7 +852,10 @@ def _get_benchmark_data(yf_period: str):
 
     for sym, label in benchmarks.items():
         try:
-            hist = yf.Ticker(sym).history(period=yf_period)
+            if intraday:
+                hist = yf.Ticker(sym).history(period=yf_period, interval="15m")
+            else:
+                hist = yf.Ticker(sym).history(period=yf_period)
             if not hist.empty:
                 closes = hist["Close"]
                 base = closes.iloc[0]
@@ -622,7 +870,7 @@ def _get_benchmark_data(yf_period: str):
 def _get_portfolio_history_period(alpaca_period: str):
     """Fetch bot portfolio history for the selected period."""
     try:
-        tf = "1D" if alpaca_period not in ("1D",) else "15Min"
+        tf = _ALPACA_TF_MAP.get(_bench_period, "1D")
         resp = http_requests.get(
             f"{config.ALPACA_BASE_URL}/v2/account/portfolio/history",
             headers=ALPACA_HEADERS,
@@ -640,9 +888,16 @@ def _get_portfolio_history_period(alpaca_period: str):
                 ts = data["timestamp"]
                 eq = data["equity"]
                 pnl = data.get("profit_loss", [0] * len(eq))
+                # Filter to baseline date
+                baseline = config.BASELINE_DATE
+                if baseline:
+                    from datetime import datetime as _dt
+                    baseline_ts = int(_dt.strptime(baseline, "%Y-%m-%d").timestamp())
+                else:
+                    baseline_ts = 0
                 fts, feq, fpnl = [], [], []
                 for i, e in enumerate(eq):
-                    if e and e > 0:
+                    if e and e > 0 and ts[i] >= baseline_ts:
                         fts.append(ts[i])
                         feq.append(e)
                         fpnl.append(pnl[i] if i < len(pnl) else 0)
@@ -654,67 +909,100 @@ def _get_portfolio_history_period(alpaca_period: str):
         pass
     return None
 
-benchmark_data = _get_benchmark_data(_yf_period)
+_is_intraday = _bench_period in ("1 D", "5 D")
+benchmark_data = _get_benchmark_data(_yf_period, intraday=_is_intraday)
 _port_hist = _get_portfolio_history_period(_ALPACA_PERIOD_MAP[_bench_period])
 
 if _port_hist and _port_hist.get("equity") and benchmark_data:
     eq = _port_hist["equity"]
     ts = _port_hist["timestamp"]
     if eq and ts and eq[0] and eq[0] > 0:
-        bot_base = eq[0]
-        bot_dates = pd.to_datetime(ts, unit="s").tz_localize("UTC").tz_convert("US/Eastern").normalize()
-        bot_pct = [((e - bot_base) / bot_base) * 100 for e in eq]
+        bot_dates_raw = pd.to_datetime(ts, unit="s").tz_localize("UTC").tz_convert("US/Eastern")
 
-        fig_bench = go.Figure()
+        # For intraday views: filter to market hours only (9:30-16:00 ET)
+        # and keep actual timestamps (don't normalize to midnight)
+        if _is_intraday:
+            bot_dates = bot_dates_raw
+            # Filter out pre-market / after-hours data points
+            mask = bot_dates.map(lambda t: 9 * 60 + 30 <= t.hour * 60 + t.minute <= 16 * 60)
+            bot_dates = bot_dates[mask]
+            eq = [e for e, m in zip(eq, mask) if m]
+        else:
+            bot_dates = bot_dates_raw.normalize()
 
-        colors = {"Dow Jones": "#1f77b4", "S&P 500": "#ff7f0e", "Nasdaq": "#2ca02c"}
-        for label, pct_series in benchmark_data.items():
-            start = bot_dates.min()
-            mask = pct_series.index >= start
-            if mask.any():
-                aligned = pct_series[mask]
-                if len(aligned) > 0:
-                    aligned = aligned - aligned.iloc[0]
-                fig_bench.add_trace(go.Scatter(
-                    x=aligned.index,
-                    y=aligned.values,
-                    name=label,
-                    line=dict(color=colors.get(label, "#999"), width=2, dash="dot"),
-                    opacity=0.8,
-                ))
+        if len(eq) == 0 or len(bot_dates) == 0:
+            st.info("No market-hours data yet for this period.")
+        else:
+            bot_base = eq[0]
+            bot_pct = [((e - bot_base) / bot_base) * 100 for e in eq]
 
-        fig_bench.add_trace(go.Scatter(
-            x=bot_dates,
-            y=bot_pct,
-            name="DeepThinkTrader",
-            line=dict(color="#e040fb", width=3),
-        ))
+            fig_bench = go.Figure()
 
-        fig_bench.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
+            colors = {"Dow Jones": "#1f77b4", "S&P 500": "#ff7f0e", "Nasdaq": "#2ca02c"}
+            for label, pct_series in benchmark_data.items():
+                # For intraday: align by time, not date
+                if _is_intraday and len(pct_series) > 0:
+                    aligned = pct_series - pct_series.iloc[0]
+                    fig_bench.add_trace(go.Scatter(
+                        x=aligned.index,
+                        y=aligned.values,
+                        name=label,
+                        line=dict(color=colors.get(label, "#999"), width=2, dash="dot"),
+                        opacity=0.8,
+                    ))
+                else:
+                    start = bot_dates.min()
+                    pct_mask = pct_series.index >= start
+                    if pct_mask.any():
+                        aligned = pct_series[pct_mask]
+                        if len(aligned) > 0:
+                            aligned = aligned - aligned.iloc[0]
+                        fig_bench.add_trace(go.Scatter(
+                            x=aligned.index,
+                            y=aligned.values,
+                            name=label,
+                            line=dict(color=colors.get(label, "#999"), width=2, dash="dot"),
+                            opacity=0.8,
+                        ))
 
-        fig_bench.update_layout(
-            title=None,
-            yaxis_title="Return %",
-            xaxis_title=None,
-            height=400,
-            template="plotly_dark",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
-            margin=dict(l=40, r=20, t=10, b=40),
-            hovermode="x unified",
-        )
-        st.plotly_chart(fig_bench, use_container_width=True)
+            fig_bench.add_trace(go.Scatter(
+                x=bot_dates,
+                y=bot_pct,
+                name="DeepThinkTrader",
+                line=dict(color="#e040fb", width=3),
+            ))
 
-        # Summary metrics
-        bcols = st.columns(4)
-        bot_return = bot_pct[-1] if bot_pct else 0
-        bcols[0].metric("DeepThinkTrader", f"{bot_return:+.2f}%")
-        for i, (label, pct_series) in enumerate(benchmark_data.items()):
-            if i < 3:
-                start = bot_dates.min()
-                mask = pct_series.index >= start
-                if mask.any():
-                    aligned = pct_series[mask]
-                    bench_return = (aligned.iloc[-1] - aligned.iloc[0]) if len(aligned) > 0 else 0
+            fig_bench.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
+
+            fig_bench.update_layout(
+                title=None,
+                yaxis_title="Return %",
+                xaxis_title=None,
+                height=400,
+                template="plotly_dark",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+                margin=dict(l=40, r=20, t=10, b=40),
+                hovermode="x unified",
+            )
+            apply_chart_theme(fig_bench)
+            st.plotly_chart(fig_bench, use_container_width=True)
+
+            # Summary metrics
+            bcols = st.columns(4)
+            bot_return = bot_pct[-1] if bot_pct else 0
+            bcols[0].metric("DeepThinkTrader", f"{bot_return:+.2f}%")
+            for i, (label, pct_series) in enumerate(benchmark_data.items()):
+                if i < 3:
+                    if _is_intraday and len(pct_series) > 0:
+                        bench_return = pct_series.iloc[-1] - pct_series.iloc[0]
+                    else:
+                        start = bot_dates.min()
+                        pct_mask = pct_series.index >= start
+                        if pct_mask.any():
+                            aligned = pct_series[pct_mask]
+                            bench_return = (aligned.iloc[-1] - aligned.iloc[0]) if len(aligned) > 0 else 0
+                        else:
+                            bench_return = 0
                     delta = bot_return - bench_return
                     bcols[i + 1].metric(label, f"{bench_return:+.2f}%", delta=f"{delta:+.2f}% vs bot")
     else:
@@ -728,7 +1016,7 @@ st.divider()
 # STRATEGY HEALTH (Phase 5c) — Moved up for visibility
 # ──────────────────────────────────────────────
 
-st.subheader("Strategy Health")
+st.markdown('<div class="section-header">Strategy Health</div>', unsafe_allow_html=True)
 
 def _show_strategy_health_top(portfolio_name: str):
     stats = db.get_strategy_stats(portfolio_name, days=30)
@@ -796,6 +1084,7 @@ def _show_strategy_health_top(portfolio_name: str):
                     yaxis_title="Expectancy ($)", height=220,
                     margin=dict(l=0, r=0, t=40, b=0),
                 )
+                apply_chart_theme(fig_exp)
                 st.plotly_chart(fig_exp, use_container_width=True)
 
 _show_strategy_health_top("main")
@@ -808,7 +1097,7 @@ st.divider()
 # PORTFOLIO VALUE + SPY BENCHMARK (Tier 1 #1, #5)
 # ──────────────────────────────────────────────
 
-st.subheader("Portfolio Value vs SPY Benchmark")
+st.markdown('<div class="section-header">Portfolio Value vs SPY Benchmark</div>', unsafe_allow_html=True)
 if portfolio_hist and portfolio_hist.get("equity"):
     timestamps = portfolio_hist["timestamp"]
     equities = portfolio_hist["equity"]
@@ -876,6 +1165,7 @@ if portfolio_hist and portfolio_hist.get("equity"):
             height=420, margin=dict(l=0, r=0, t=30, b=0),
             legend=dict(orientation="h", yanchor="bottom", y=1.02),
         )
+        apply_chart_theme(fig_port)
         st.plotly_chart(fig_port, use_container_width=True)
 
         # Drawdown chart (Tier 1 #1)
@@ -894,6 +1184,7 @@ if portfolio_hist and portfolio_hist.get("equity"):
                 yaxis_title="Drawdown (%)", height=200,
                 margin=dict(l=0, r=0, t=40, b=0),
             )
+            apply_chart_theme(fig_dd)
             st.plotly_chart(fig_dd, use_container_width=True)
 else:
     st.info("Portfolio history will populate after first trading day")
@@ -904,7 +1195,7 @@ st.divider()
 # DAILY P&L BAR CHART (Tier 1 #4)
 # ──────────────────────────────────────────────
 
-st.subheader("Daily P&L")
+st.markdown('<div class="section-header">Daily P&L</div>', unsafe_allow_html=True)
 if portfolio_hist and portfolio_hist.get("profit_loss"):
     ts = portfolio_hist["timestamp"]
     pnls = portfolio_hist["profit_loss"]
@@ -928,6 +1219,7 @@ if portfolio_hist and portfolio_hist.get("profit_loss"):
             yaxis_title="Daily P&L ($)", height=250,
             margin=dict(l=0, r=0, t=10, b=0),
         )
+        apply_chart_theme(fig_daily)
         st.plotly_chart(fig_daily, use_container_width=True)
 
         # Summary stats
@@ -955,7 +1247,7 @@ st.divider()
 # LIVE POSITIONS
 # ──────────────────────────────────────────────
 
-st.subheader("Current Positions (Live)")
+st.markdown('<div class="section-header">Current Positions (Live)</div>', unsafe_allow_html=True)
 if positions:
     # Build lookup of DB trade data for open positions (trailing stops, risk, edges)
     _open_db_trades = {t["ticker"]: t for t in open_trades_db}
@@ -1086,6 +1378,7 @@ if positions:
             fig_pnl = go.Figure(go.Bar(x=pnl_df["ticker"], y=pnl_df["pnl"], marker_color=colors))
             fig_pnl.update_layout(title="P&L by Position", yaxis_title="P&L ($)", height=250,
                                   margin=dict(l=0, r=0, t=40, b=0))
+            apply_chart_theme(fig_pnl)
             st.plotly_chart(fig_pnl, use_container_width=True)
 
     with pcol2:
@@ -1100,6 +1393,7 @@ if positions:
         fig_pie = px.pie(alloc_df, values="Value", names="Ticker", title="Portfolio Allocation",
                          hole=0.4, color_discrete_sequence=px.colors.qualitative.Set2)
         fig_pie.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+        apply_chart_theme(fig_pie)
         st.plotly_chart(fig_pie, use_container_width=True)
 
         # Sector exposure (Tier 2 #9)
@@ -1132,6 +1426,7 @@ if positions:
                                     title="Sector Exposure",
                                     hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
                 fig_sector.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+                apply_chart_theme(fig_sector)
                 st.plotly_chart(fig_sector, use_container_width=True)
 else:
     st.info("No open positions")
@@ -1142,7 +1437,7 @@ st.divider()
 # TRADE HISTORY (Tier 2 #8: Filtering + Export)
 # ──────────────────────────────────────────────
 
-st.subheader("Trade History")
+st.markdown('<div class="section-header">Trade History</div>', unsafe_allow_html=True)
 if all_trades:
     df_trades_raw = pd.DataFrame(all_trades)
 
@@ -1243,6 +1538,30 @@ if all_trades:
         },
     )
 
+    # Trade Reasoning Detail View
+    if "reasoning" in df_trades_raw.columns:
+        trades_with_reasoning = df_trades_raw[
+            df_trades_raw["reasoning"].notna() & (df_trades_raw["reasoning"] != "")
+        ]
+        if not trades_with_reasoning.empty:
+            with st.expander("Trade Reasoning Details", expanded=False):
+                for _, row in trades_with_reasoning.head(20).iterrows():
+                    ticker = row.get("ticker", "?")
+                    ts = row.get("timestamp", "")[:16] if row.get("timestamp") else ""
+                    action = row.get("action", "")
+                    conv = row.get("conviction", 0)
+                    pnl = row.get("pnl")
+                    pnl_str = f" | P&L: ${pnl:+,.2f}" if pnl and pnl != 0 else ""
+                    status = row.get("status", "")
+                    status_icon = "🟢" if status == "OPEN" else ("🟩" if pnl and pnl > 0 else "🟥")
+
+                    st.markdown(
+                        f"**{status_icon} {action} {ticker}** — {ts} | "
+                        f"Conviction: {conv}/10{pnl_str}"
+                    )
+                    st.text(row["reasoning"])
+                    st.divider()
+
     # CSV Export (Tier 2 #8)
     csv_data = df_trades[available_cols].to_csv(index=False)
     st.download_button("Export to CSV", csv_data, "trade_history.csv", "text/csv")
@@ -1327,6 +1646,7 @@ if all_trades:
         fig_cum = px.line(closed_df_raw, x="timestamp", y="cumulative_pnl",
                           title="Cumulative Realized P&L")
         fig_cum.update_layout(yaxis_title="P&L ($)")
+        apply_chart_theme(fig_cum)
         st.plotly_chart(fig_cum, use_container_width=True)
 else:
     st.info("No trades yet")
@@ -1337,7 +1657,7 @@ st.divider()
 # RECENT ANALYSES
 # ──────────────────────────────────────────────
 
-st.subheader("Recent Analyses")
+st.markdown('<div class="section-header">Recent Analyses</div>', unsafe_allow_html=True)
 analyses = db.get_recent_analyses(100, portfolio=_pf)
 if analyses:
     df_analysis = pd.DataFrame(analyses)
@@ -1419,6 +1739,7 @@ if analyses:
                             title="Conviction Score Distribution",
                             color_discrete_sequence=["#2196F3"])
         fig2.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0))
+        apply_chart_theme(fig2)
         st.plotly_chart(fig2, use_container_width=True)
     with chart_col2:
         if _edges_list:
@@ -1428,6 +1749,7 @@ if analyses:
                                      labels={"x": "Edges Firing", "count": "Count"})
             fig_edges.update_layout(height=280, margin=dict(l=0, r=0, t=40, b=0),
                                     xaxis=dict(dtick=1))
+            apply_chart_theme(fig_edges)
             st.plotly_chart(fig_edges, use_container_width=True)
 else:
     st.info("No analyses yet")

@@ -34,6 +34,6 @@
 - `CIRCUIT_BREAKER_SPY_DROP_PCT`, `EARNINGS_EXIT_DAYS`, `EARNINGS_EXIT_MODE`
 
 ### Known Issues
-- Volatility adjustment uses current ATR vs estimated median (needs historical ATR storage)
-- VIX/breadth data not yet integrated into sentiment edge (uses news + Reddit as proxy)
-- Strategy auto-pause logs warning but doesn't actually halt the portfolio yet
+- ~~Volatility adjustment uses current ATR vs estimated median (needs historical ATR storage)~~ FIXED — auto-seeds 3mo ATR history from yfinance on first encounter
+- ~~VIX/breadth data not yet integrated into sentiment edge (uses news + Reddit as proxy)~~ FIXED — VIX level + sector breadth (11 S&P sector ETFs) now feed into sentiment edge evaluation
+- ~~Strategy auto-pause logs warning but doesn't actually halt the portfolio yet~~ FIXED — pauses portfolio and blocks new trades, auto-resumes on recovery

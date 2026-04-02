@@ -53,6 +53,7 @@ class DeepThinkTrader:
         self.scanner = ScannerAgent(self.db)
         self.clock = get_market_clock()
         self._last_scan_date: str = ""
+        self._paused_portfolios: set[str] = set()
 
     def _run_scan(self) -> list[str]:
         """Run full-universe scan every cycle. Fast (~60s) thanks to batch API calls."""
@@ -91,6 +92,20 @@ class DeepThinkTrader:
     def run_cycle(self, tickers: list[str] | None = None, portfolio: str = "main") -> list[dict]:
         """Run one full research → analysis → execution cycle for all watchlist tickers."""
         label = portfolio.upper()
+
+        # Block new trades if portfolio is paused due to strategy degradation
+        if portfolio in self._paused_portfolios:
+            logger.warning(
+                f"[{label}] Portfolio PAUSED due to strategy degradation — "
+                f"skipping cycle. Exit monitoring continues. "
+                f"Unpause manually or wait for next weekly health check."
+            )
+            # Still check exits on open positions even when paused
+            exits = self.execution.check_exit_conditions()
+            if exits:
+                for ex in exits:
+                    logger.info(f"[{label}] Position closed (paused portfolio): {ex['ticker']} — {ex['reason']}")
+            return []
 
         if portfolio == "penny":
             discovered = self._run_penny_scan()
@@ -239,9 +254,18 @@ class DeepThinkTrader:
                 f"WR delta={perf['win_rate_delta']*100:+.0f}%"
             )
             if perf["win_rate_delta"] < -0.15:
+                self._paused_portfolios.add(portfolio)
                 logger.warning(
-                    f"STRATEGY DEGRADATION [{portfolio}]: Win rate dropped "
-                    f"{abs(perf['win_rate_delta'])*100:.0f}% from baseline — review required"
+                    f"STRATEGY PAUSED [{portfolio}]: Win rate dropped "
+                    f"{abs(perf['win_rate_delta'])*100:.0f}% from baseline — "
+                    f"new trades halted until next weekly review or manual unpause"
+                )
+            elif portfolio in self._paused_portfolios:
+                # Recovery: unpause if win rate delta has improved
+                self._paused_portfolios.discard(portfolio)
+                logger.info(
+                    f"STRATEGY RESUMED [{portfolio}]: Win rate delta recovered to "
+                    f"{perf['win_rate_delta']*100:+.0f}% — trading re-enabled"
                 )
 
     def start_scheduled(self) -> None:
@@ -279,7 +303,18 @@ class DeepThinkTrader:
 
         while True:
             schedule.run_pending()
-            time.sleep(30)
+
+            # Sync to market open: if market opens within 60s, wait and run immediately
+            mins_to_open = self.clock.minutes_until_open()
+            if mins_to_open is not None and 0 < mins_to_open <= 1:
+                logger.info(f"Market opens in {mins_to_open:.0f} min — waiting for 9:30 ET...")
+                time.sleep(max(10, mins_to_open * 60))
+                self._guarded_cycle()
+            elif mins_to_open is not None and 0 < mins_to_open <= 30:
+                # Within 30 min of open — poll every 10s instead of 30s
+                time.sleep(10)
+            else:
+                time.sleep(30)
 
 
 def main():

@@ -214,6 +214,53 @@ class ResearchAgent:
             logger.error(f"yfinance error for {ticker}: {e}")
             return {"ticker": ticker, "error": str(e), "source": "yfinance"}
 
+    @staticmethod
+    def _fetch_market_regime() -> dict:
+        """Fetch VIX level and market breadth (advance/decline ratio) for regime detection."""
+        try:
+            import yfinance as yf
+
+            result = {}
+
+            # VIX level
+            vix = yf.Ticker("^VIX")
+            vix_hist = vix.history(period="5d")
+            if not vix_hist.empty:
+                result["vix"] = round(float(vix_hist["Close"].iloc[-1]), 2)
+                if len(vix_hist) >= 2:
+                    result["vix_prev"] = round(float(vix_hist["Close"].iloc[-2]), 2)
+                    result["vix_change"] = round(result["vix"] - result["vix_prev"], 2)
+
+            # Market breadth via advance/decline proxy
+            # Use S&P 500 component ETFs as breadth indicator
+            breadth_tickers = ["XLK", "XLF", "XLV", "XLE", "XLI", "XLC", "XLY", "XLP", "XLU", "XLRE", "XLB"]
+            advancing = 0
+            total = 0
+            for sym in breadth_tickers:
+                try:
+                    h = yf.Ticker(sym).history(period="2d")
+                    if len(h) >= 2:
+                        total += 1
+                        if h["Close"].iloc[-1] > h["Close"].iloc[-2]:
+                            advancing += 1
+                except Exception:
+                    continue
+
+            if total > 0:
+                result["breadth_ratio"] = round(advancing / total, 2)
+                result["sectors_advancing"] = advancing
+                result["sectors_total"] = total
+
+            logger.info(
+                f"Market regime: VIX={result.get('vix', '?')}, "
+                f"Breadth={result.get('breadth_ratio', '?')} "
+                f"({result.get('sectors_advancing', 0)}/{result.get('sectors_total', 0)} sectors up)"
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"Market regime fetch failed: {e}")
+            return {}
+
     def generate_report(self, ticker: str) -> dict:
         """Generate a full research report combining all sources."""
         logger.info(f"Generating research report for {ticker}...")
@@ -496,6 +543,23 @@ class ResearchAgent:
             elif rev_growth and rev_growth < -0.05:
                 risks.append(f"Revenue declining ({rev_growth*100:.0f}%)")
 
+        # Market regime data: VIX + advance/decline breadth
+        market_regime = self._fetch_market_regime()
+        if market_regime:
+            vix = market_regime.get("vix", 0)
+            if vix >= 30:
+                risks.append(f"VIX at {vix:.1f} — extreme fear regime")
+            elif vix >= 25:
+                risks.append(f"VIX elevated at {vix:.1f} — heightened volatility")
+            elif vix < 15:
+                opportunities.append(f"VIX low at {vix:.1f} — calm market conditions")
+
+            breadth = market_regime.get("breadth_ratio", 0)
+            if breadth > 0.6:
+                opportunities.append(f"Broad market participation ({breadth:.0%} advancing)")
+            elif breadth < 0.4:
+                risks.append(f"Narrow breadth ({breadth:.0%} advancing) — weak participation")
+
         # Pad to at least 3 each
         while len(risks) < 3:
             risks.append("No additional risk factors identified")
@@ -514,6 +578,7 @@ class ResearchAgent:
             "advanced_technicals": advanced_technicals,
             "fundamentals": fundamentals,
             "seeking_alpha": sa_intel,
+            "market_regime": market_regime,
             "risks": risks[:7],
             "opportunities": opportunities[:5],
         }

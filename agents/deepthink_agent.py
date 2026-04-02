@@ -315,7 +315,7 @@ class DeepThinkAgent:
         return {"passed": passed, "strength": criteria_met, "details": details, "label": "Technical"}
 
     def _evaluate_sentiment_edge(self, report: dict) -> dict:
-        """Phase 3c: Sentiment/Regime edge — VIX, news catalyst score."""
+        """Phase 3c: Sentiment/Regime edge — VIX, breadth, news catalyst, Reddit."""
         criteria_met = 0
         details = []
 
@@ -337,8 +337,30 @@ class DeepThinkAgent:
             criteria_met += 1
             details.append(f"Bullish Reddit ({reddit_score:.2f})")
 
+        # 4. VIX regime — low VIX supports bullish sentiment
+        regime = report.get("market_regime", {})
+        vix = regime.get("vix", 0)
+        if vix > 0:
+            if vix < 20:
+                criteria_met += 1
+                details.append(f"VIX favorable ({vix:.1f} < 20)")
+            elif vix >= 25:
+                # High VIX actively hurts sentiment edge
+                criteria_met -= 1
+                details.append(f"VIX elevated ({vix:.1f} >= 25)")
+
+        # 5. Market breadth — broad participation supports bullish thesis
+        breadth = regime.get("breadth_ratio", 0)
+        if breadth > 0:
+            if breadth >= 0.6:
+                criteria_met += 1
+                details.append(f"Broad market advance ({breadth:.0%} sectors up)")
+            elif breadth <= 0.3:
+                criteria_met -= 1
+                details.append(f"Narrow breadth ({breadth:.0%} sectors up)")
+
         passed = criteria_met >= 2
-        return {"passed": passed, "strength": criteria_met, "details": details, "label": "Sentiment"}
+        return {"passed": passed, "strength": max(0, criteria_met), "details": details, "label": "Sentiment"}
 
     def _evaluate_edges(self, report: dict) -> tuple[int, list[dict]]:
         """Run all 3 edge checks and return (edges_firing, edge_details)."""
