@@ -141,7 +141,7 @@ class Config:
     MIN_EDGES_REQUIRED: int = int(os.getenv("MIN_EDGES_REQUIRED", "2"))
 
     # ── Warmup: analyze N unique tickers before first trade ─────
-    WARMUP_MIN_TICKERS: int = int(os.getenv("WARMUP_MIN_TICKERS", "200"))
+    WARMUP_MIN_TICKERS: int = int(os.getenv("WARMUP_MIN_TICKERS", "100"))
 
     # ── Phase 4: Smart Orders ─────────────────────────────────────
     PENNY_LIMIT_SLIPPAGE_PCT: float = float(os.getenv("PENNY_LIMIT_SLIPPAGE_PCT", "0.5"))
@@ -166,6 +166,9 @@ class Config:
         os.path.expanduser("~/Documents/RHVault/RHVault"),
     )
     OBSIDIAN_SA_MAX_AGE_DAYS: int = int(os.getenv("OBSIDIAN_SA_MAX_AGE_DAYS", "7"))
+
+    # Baseline date — dashboard ignores Alpaca portfolio history before this date
+    BASELINE_DATE: str = os.getenv("BASELINE_DATE", "2026-03-24")
 
     # Database
     DB_PATH: str = os.path.join(os.path.dirname(__file__), "trades.db")

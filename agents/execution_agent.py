@@ -234,8 +234,9 @@ class ExecutionAgent:
         risk_amount: float, account_value: float, edges_firing: int,
         rr_ratio: float, stop_price: float, target_price: float,
         avg_daily_volume: int, portfolio: str,
+        analysis: dict | None = None,
     ) -> str:
-        """Log a plain-English pre-trade summary."""
+        """Log a plain-English pre-trade summary with thesis and invalidation."""
         risk_pct = (risk_amount / account_value * 100) if account_value > 0 else 0
         summary = (
             f"{action} {shares} shares of {ticker} @ ${price:.2f}\n"
@@ -244,6 +245,24 @@ class ExecutionAgent:
             f"  R:R = {rr_ratio:.1f}:1 | Stop: ${stop_price:.2f} | Target: ${target_price:.2f}\n"
             f"  Portfolio: {portfolio} | ADV: {avg_daily_volume:,}"
         )
+
+        # Add thesis from analysis reasoning
+        if analysis:
+            reasoning = analysis.get("reasoning_summary", "")
+            if reasoning:
+                summary += f"\n  Thesis: {reasoning}"
+
+            # Add invalidation criteria from top risks
+            risks = analysis.get("risks", [])
+            if risks:
+                invalidation = "; ".join(risks[:3])
+                summary += f"\n  Invalidated if: {invalidation}"
+
+            # Add Claude's qualitative note if present
+            claude = analysis.get("claude_analysis") or {}
+            if claude.get("qualitative_assessment"):
+                summary += f"\n  AI Note: {claude['qualitative_assessment']}"
+
         logger.info(f"TRADE SUMMARY:\n{summary}")
         return summary
 
@@ -293,22 +312,21 @@ class ExecutionAgent:
             portfolio=portfolio,
         )
 
-        # Apply volatility adjustment if ATR data available — now with real median
+        # Apply volatility adjustment if ATR data available — uses real historical median
         adv_tech = analysis.get("advanced_technicals", {})
         current_atr = 0.0
         if adv_tech:
             atr_data = adv_tech.get("atr", {})
             current_atr = atr_data.get("atr", 0) if atr_data else 0
             if current_atr > 0:
-                # Store ATR for future median calculation
+                # Store today's ATR
                 self.db.save_atr(ticker, current_atr)
-                # Use real median from history, fall back to 70% estimate
+                # get_median_atr auto-seeds from yfinance if insufficient history
                 median_atr = self.db.get_median_atr(ticker)
-                if median_atr <= 0:
-                    median_atr = current_atr * 0.7
-                vol_mult = self.risk_manager.check_volatility_adjustment(current_atr, median_atr)
-                if vol_mult < 1.0:
-                    shares = int(shares * vol_mult)
+                if median_atr > 0:
+                    vol_mult = self.risk_manager.check_volatility_adjustment(current_atr, median_atr)
+                    if vol_mult < 1.0:
+                        shares = int(shares * vol_mult)
 
         # Phase 6d: Overnight gap risk — reduce position for high-gap-risk names
         fundamentals = analysis.get("fundamentals", {})
@@ -390,6 +408,22 @@ class ExecutionAgent:
         risk_amount = round(shares * risk_per_share, 2)
         max_loss_pct_account = round((risk_amount / account_value) * 100, 2)
 
+        # Hard cap: if dollar risk exceeds configured max risk per trade, tighten the stop
+        params = self.risk_manager._get_params(portfolio)
+        max_allowed_risk = account_value * params["max_risk_per_trade"]
+        if risk_amount > max_allowed_risk and shares > 0 and current_price > 0:
+            # Recalculate stop_loss_pct so dollar risk = max_allowed_risk
+            max_risk_per_share = max_allowed_risk / shares
+            capped_stop_pct = round((max_risk_per_share / current_price) * 100, 2)
+            logger.warning(
+                f"STOP CAP: {ticker} stop tightened from {stop_loss_pct:.1f}% to {capped_stop_pct:.1f}% "
+                f"(risk ${risk_amount:.0f} > max ${max_allowed_risk:.0f})"
+            )
+            stop_loss_pct = capped_stop_pct
+            take_profit_pct = round(stop_loss_pct * params["min_reward_risk_ratio"], 1)
+            risk_per_share = current_price * (stop_loss_pct / 100)
+            risk_amount = round(shares * risk_per_share, 2)
+
         # Calculate stop and target prices
         if action == "BUY":
             stop_price = round(current_price * (1 - stop_loss_pct / 100), 2)
@@ -411,10 +445,10 @@ class ExecutionAgent:
             )
 
         # Phase 5d: Trade transparency — log summary before execution
-        self._log_trade_summary(
+        trade_summary = self._log_trade_summary(
             ticker, action, shares, current_price, risk_amount,
             account_value, edges_firing, rr_ratio, stop_price, target_price,
-            avg_daily_volume, portfolio,
+            avg_daily_volume, portfolio, analysis=analysis,
         )
 
         # Phase 4a: Use limit orders for penny stocks
@@ -502,7 +536,7 @@ class ExecutionAgent:
                 "take_profit_price": target_price,
                 "conviction": conviction,
                 "order_id": alpaca_order_id,
-                "reasoning": analysis.get("reasoning_summary", ""),
+                "reasoning": trade_summary,
             }
             trade_id = self.db.save_trade(trade_record, portfolio=portfolio)
 
@@ -824,6 +858,95 @@ class ExecutionAgent:
 
         return result
 
+    def _reconcile_missing_position(self, trade: dict, exits: list[dict]) -> None:
+        """Reconcile a DB trade marked OPEN whose position no longer exists in Alpaca.
+
+        Queries Alpaca closed orders to find the actual exit price and P&L,
+        then closes the trade in the DB so it can be used for learning.
+        """
+        ticker = trade["ticker"]
+        trade_id = trade["id"]
+        entry = trade.get("entry_price", 0)
+        qty = trade.get("quantity", 0)
+        is_long = trade.get("action") == "BUY"
+
+        try:
+            # Look for recent sell orders for this ticker
+            side_filter = "sell" if is_long else "buy"
+            resp = self._session.get(
+                f"{self._base_url}/v2/orders",
+                params={
+                    "status": "closed",
+                    "symbols": ticker,
+                    "limit": 10,
+                    "direction": "desc",
+                },
+            )
+            if not resp.ok:
+                logger.warning(f"DB SYNC: Could not query orders for {ticker} (HTTP {resp.status_code})")
+                return
+
+            orders = resp.json()
+            exit_order = None
+            for order in orders:
+                if order.get("side") == side_filter and order.get("status") == "filled":
+                    filled_price = float(order.get("filled_avg_price", 0) or 0)
+                    if filled_price > 0:
+                        exit_order = order
+                        break
+
+            if exit_order:
+                exit_price = float(exit_order["filled_avg_price"])
+                filled_qty = int(exit_order.get("filled_qty", qty) or qty)
+                if is_long:
+                    pnl = round((exit_price - entry) * filled_qty, 2)
+                else:
+                    pnl = round((entry - exit_price) * filled_qty, 2)
+
+                self.db.close_trade(trade_id, exit_price, pnl, exit_reason="alpaca_reconcile")
+                self.db.update_daily_pnl(pnl, pnl > 0)
+                logger.info(
+                    f"DB SYNC: Reconciled {ticker} — closed at ${exit_price:.2f}, "
+                    f"P&L: ${pnl:+.2f} (was missing from Alpaca positions)"
+                )
+                exits.append({
+                    "trade_id": trade_id,
+                    "ticker": ticker,
+                    "reason": "alpaca_reconcile",
+                    "pnl": pnl,
+                })
+            else:
+                # No matching sell order found — close at last known price as fallback
+                logger.warning(
+                    f"DB SYNC: No exit order found for {ticker} — marking CLOSED with estimated P&L"
+                )
+                try:
+                    import yfinance as yf
+                    last_price = float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+                except Exception:
+                    last_price = entry  # worst case: 0 P&L
+
+                if is_long:
+                    pnl = round((last_price - entry) * qty, 2)
+                else:
+                    pnl = round((entry - last_price) * qty, 2)
+
+                self.db.close_trade(trade_id, last_price, pnl, exit_reason="alpaca_reconcile_estimated")
+                self.db.update_daily_pnl(pnl, pnl > 0)
+                logger.info(
+                    f"DB SYNC: Reconciled {ticker} (estimated) — ${last_price:.2f}, "
+                    f"P&L: ${pnl:+.2f}"
+                )
+                exits.append({
+                    "trade_id": trade_id,
+                    "ticker": ticker,
+                    "reason": "alpaca_reconcile_estimated",
+                    "pnl": pnl,
+                })
+
+        except Exception as e:
+            logger.error(f"DB SYNC failed for {ticker}: {e}")
+
     def check_exit_conditions(self) -> list[dict]:
         """Check open positions against SL, TP, trailing stops, time stops, momentum, and earnings."""
         exits = []
@@ -833,6 +956,8 @@ class ExecutionAgent:
         for trade in open_trades:
             ticker = trade["ticker"]
             if ticker not in positions:
+                # Position gone from Alpaca but still OPEN in DB — reconcile
+                self._reconcile_missing_position(trade, exits)
                 continue
 
             pos = positions[ticker]
