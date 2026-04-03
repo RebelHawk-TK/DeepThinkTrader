@@ -163,7 +163,7 @@ class Config:
     # Obsidian Vault (Seeking Alpha emails)
     OBSIDIAN_VAULT_PATH: str = os.getenv(
         "OBSIDIAN_VAULT_PATH",
-        os.path.expanduser("~/Documents/RHVault/RHVault"),
+        os.path.expanduser("~/Documents/TKSabrinaIncVault"),
     )
     OBSIDIAN_SA_MAX_AGE_DAYS: int = int(os.getenv("OBSIDIAN_SA_MAX_AGE_DAYS", "7"))
 
