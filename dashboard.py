@@ -928,6 +928,13 @@ _port_hist = _get_portfolio_history_period(_ALPACA_PERIOD_MAP[_bench_period])
 if _port_hist and _port_hist.get("equity") and benchmark_data:
     eq = _port_hist["equity"]
     ts = _port_hist["timestamp"]
+
+    # Show "last trading day" label when market is closed and viewing 1D
+    if _bench_period == "1 D" and not _mstatus["is_open"] and ts:
+        from datetime import datetime as _dtx
+        _last_day = _dtx.fromtimestamp(ts[-1]).strftime("%A, %b %-d")
+        st.caption(f"Market closed — showing last trading day: {_last_day}")
+
     if eq and ts and eq[0] and eq[0] > 0:
         bot_dates_raw = pd.to_datetime(ts, unit="s").tz_localize("UTC").tz_convert("US/Eastern")
 
