@@ -22,6 +22,7 @@ from newsapi import NewsApiClient
 from config import Config
 from utils.alpaca_data import AlpacaMarketData
 from utils.database import Database
+from utils.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ class ScannerAgent:
     def __init__(self, db: Database | None = None):
         self.config = Config()
         self.db = db or Database()
+        self.rate_limiter = RateLimiter()
         self.alpaca_data = AlpacaMarketData(self.db)
         self._session = self.alpaca_data._session
         self._data_url = "https://data.alpaca.markets"
@@ -139,7 +141,10 @@ class ScannerAgent:
         return results
 
     def _discover_news_trending(self, top_n: int = 20) -> list[dict]:
+        if not self.rate_limiter.can_call_newsapi():
+            return []
         try:
+            self.rate_limiter.record_newsapi_call()
             newsapi = NewsApiClient(api_key=self.config.NEWSAPI_KEY)
             from_date = (datetime.now() - timedelta(hours=12)).strftime("%Y-%m-%d")
             response = newsapi.get_everything(

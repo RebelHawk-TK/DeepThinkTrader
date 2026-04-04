@@ -428,6 +428,38 @@ portfolio_hist = get_portfolio_history()
 
 st.sidebar.header("Controls")
 
+# Theme toggle
+_theme = st.sidebar.toggle("Light Theme", value=False)
+if _theme:
+    st.markdown("""<style>
+    [data-testid="stAppViewContainer"] { background-color: #f5f5f5; }
+    [data-testid="stSidebar"] { background: #e8e8e8 !important; }
+    .kpi-card { background: linear-gradient(135deg, #f0f0f5 0%, #e8eaf6 100%); border-color: #c5cae9; }
+    .kpi-card-green { background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); border-color: #a5d6a7; }
+    .kpi-card-red { background: linear-gradient(135deg, #fce4ec 0%, #f8bbd0 100%); border-color: #ef9a9a; }
+    .kpi-card-amber { background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%); border-color: #ffe082; }
+    .section-header { color: #37474f !important; border-bottom-color: #cfd8dc !important; }
+    h1, h2, h3 { color: #263238 !important; }
+    [data-testid="stMetricLabel"] { color: #546e7a !important; }
+    .ticker-wrap { background: #e8eaf6 !important; }
+    </style>""", unsafe_allow_html=True)
+
+# Compact mode for mobile
+_compact = st.sidebar.toggle("Compact Mode", value=True)
+if _compact:
+    st.markdown("""<style>
+    @media (max-width: 768px) {
+        [data-testid="stHorizontalBlock"] { flex-direction: column !important; }
+        [data-testid="stColumn"] { width: 100% !important; flex: 1 1 100% !important; }
+        .kpi-card, .kpi-card-green, .kpi-card-red, .kpi-card-amber { padding: 12px 10px 10px; }
+        [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+    }
+    .kpi-card, .kpi-card-green, .kpi-card-red, .kpi-card-amber { padding: 12px 10px 10px; margin-bottom: 6px; }
+    [data-testid="stMetricValue"] { font-size: 1rem !important; }
+    [data-testid="stMetricLabel"] { font-size: 0.6rem !important; }
+    .section-header { font-size: 0.9rem; margin: 16px 0 8px; }
+    </style>""", unsafe_allow_html=True)
+
 # Auto-refresh with adjustable interval (persisted via session state)
 auto_refresh = st.sidebar.toggle("Auto Refresh", value=True)
 
@@ -602,6 +634,51 @@ try:
     st.sidebar.caption(f"Source: {_mstatus['source']}")
 except Exception as _e:
     st.sidebar.markdown("**Market Clock:** unavailable")
+
+# === SYSTEM HEALTH ===
+st.sidebar.markdown("---")
+st.sidebar.subheader("System Health")
+
+try:
+    _db_health = db.health_check()
+    _db_ok = _db_health.get("status") == "ok"
+    _journal = _db_health.get("journal_mode", "unknown")
+    st.sidebar.markdown(f"**Database:** {'🟢' if _db_ok else '🔴'} {_journal.upper()} mode")
+except Exception:
+    st.sidebar.markdown("**Database:** 🔴 unavailable")
+
+try:
+    from utils.rate_limiter import RateLimiter as _RL
+    _rl_status = _RL().newsapi_status()
+    _rl_pct = _rl_status["pct_used"]
+    _rl_color = "🟢" if _rl_pct < 80 else ("🟡" if _rl_pct < 95 else "🔴")
+    st.sidebar.markdown(f"**NewsAPI:** {_rl_color} {_rl_status['used']}/{_rl_status['limit']} today")
+except Exception:
+    pass
+
+try:
+    from utils.state import StateManager as _SM
+    _sm = _SM()
+    _paused = _sm.paused_portfolios
+    if _paused:
+        st.sidebar.markdown(f"**Paused:** 🔴 {', '.join(_paused)}")
+    else:
+        st.sidebar.markdown("**Paused:** 🟢 None")
+
+    # Warmup progress
+    _warmup_seen = _sm.warmup_tickers_seen
+    _warmup_target = config.WARMUP_MIN_TICKERS
+    if _warmup_seen < _warmup_target:
+        _warmup_pct = _warmup_seen / _warmup_target
+        st.sidebar.markdown(f"**Warmup:** {_warmup_seen}/{_warmup_target} tickers")
+        st.sidebar.progress(_warmup_pct)
+except Exception:
+    pass
+
+_state_path = os.path.join(os.path.dirname(__file__), ".state.json")
+if os.path.exists(_state_path):
+    _state_mtime = dt.fromtimestamp(os.path.getmtime(_state_path)).strftime("%H:%M:%S")
+    st.sidebar.markdown(f"**State saved:** {_state_mtime}")
 
 if account:
     st.sidebar.markdown("---")
@@ -1564,6 +1641,10 @@ if all_trades:
         ]
         if not trades_with_reasoning.empty:
             with st.expander("Trade Reasoning Details", expanded=False):
+                # PDF-style export: generate a full trade report as downloadable text
+                _report_lines = ["DEEPTHINKTRADER — TRADE REASONING REPORT",
+                                 f"Generated: {dt.now().strftime('%Y-%m-%d %H:%M')}",
+                                 "=" * 60, ""]
                 for _, row in trades_with_reasoning.head(20).iterrows():
                     ticker = row.get("ticker", "?")
                     ts = row.get("timestamp", "")[:16] if row.get("timestamp") else ""
@@ -1580,6 +1661,25 @@ if all_trades:
                     )
                     st.text(row["reasoning"])
                     st.divider()
+
+                    # Build export text
+                    _report_lines.append(f"{action} {ticker} — {ts}")
+                    _report_lines.append(f"Status: {status} | Conviction: {conv}/10{pnl_str}")
+                    _edges = row.get("edges_fired")
+                    if _edges is not None:
+                        _report_lines.append(f"Edges: {int(_edges)}/3")
+                    _report_lines.append("")
+                    _report_lines.append(str(row.get("reasoning", "")))
+                    _report_lines.append("-" * 60)
+                    _report_lines.append("")
+
+                _report_text = "\n".join(_report_lines)
+                st.download_button(
+                    "Export Trade Report",
+                    _report_text,
+                    f"trade_report_{dt.now().strftime('%Y%m%d')}.txt",
+                    "text/plain",
+                )
 
     # CSV Export (Tier 2 #8)
     csv_data = df_trades[available_cols].to_csv(index=False)
@@ -1872,6 +1972,62 @@ with st.expander("Alpaca API Request IDs (debugging)"):
         st.dataframe(df_reqs[available_cols], use_container_width=True)
     else:
         st.info("No API calls logged yet")
+
+# ──────────────────────────────────────────────
+# ALERT HISTORY FEED
+# ──────────────────────────────────────────────
+
+with st.expander("Alert History (Recent Notifications)"):
+    # Read from notification rate-limit cache (in-memory, shows current session only)
+    try:
+        from utils.notifications import _last_sent
+        if _last_sent:
+            _alert_rows = []
+            for event_type, ts in sorted(_last_sent.items(), key=lambda x: x[1], reverse=True):
+                _alert_rows.append({
+                    "Event": event_type,
+                    "Time": dt.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S"),
+                })
+            st.dataframe(pd.DataFrame(_alert_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("No notifications sent this session")
+    except Exception:
+        st.info("Notification module not loaded")
+
+    # Also scan recent log for key events
+    _alert_keywords = ["ORDER EXECUTED", "EXIT —", "PARTIAL EXIT", "STRATEGY PAUSED",
+                        "STRATEGY RESUMED", "Circuit breaker", "Daily loss limit"]
+    if os.path.exists(log_path):
+        try:
+            with open(log_path, "rb") as _f:
+                _f.seek(0, 2)
+                _sz = _f.tell()
+                _read = min(_sz, 100000)
+                _f.seek(max(0, _sz - _read))
+                _log_lines = _f.read().decode("utf-8", errors="ignore").splitlines()
+
+            _event_lines = []
+            for _line in reversed(_log_lines):
+                if any(kw in _line for kw in _alert_keywords):
+                    _event_lines.append(_line)
+                    if len(_event_lines) >= 20:
+                        break
+
+            if _event_lines:
+                st.markdown("**Recent Log Events:**")
+                for _el in _event_lines:
+                    _ts_part = _el[:19] if len(_el) > 19 else ""
+                    _msg_part = _el[20:] if len(_el) > 20 else _el
+                    if "EXECUTED" in _el:
+                        st.markdown(f"<span style='color:#e040fb;font-size:12px;font-family:monospace'>{_ts_part} {_msg_part}</span>", unsafe_allow_html=True)
+                    elif "EXIT" in _el:
+                        st.markdown(f"<span style='color:#ff9800;font-size:12px;font-family:monospace'>{_ts_part} {_msg_part}</span>", unsafe_allow_html=True)
+                    elif "PAUSED" in _el or "Circuit" in _el or "loss limit" in _el:
+                        st.markdown(f"<span style='color:#f44336;font-size:12px;font-family:monospace'>{_ts_part} {_msg_part}</span>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"<span style='color:#8892b0;font-size:12px;font-family:monospace'>{_ts_part} {_msg_part}</span>", unsafe_allow_html=True)
+        except Exception:
+            pass
 
 # Footer
 st.divider()

@@ -10,6 +10,7 @@ from config import Config
 class Database:
     def __init__(self, db_path: str = Config.DB_PATH):
         self.db_path = db_path
+        self._enable_wal()
         self._init_tables()
         # Security: restrict database file permissions to owner only
         try:
@@ -18,10 +19,41 @@ class Database:
         except OSError:
             pass
 
+    def _enable_wal(self) -> None:
+        """Enable Write-Ahead Logging for better concurrency and crash recovery."""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            conn.close()
+            if mode.lower() == "wal":
+                import logging
+                logging.getLogger(__name__).info(f"SQLite WAL mode enabled for {self.db_path}")
+        except Exception:
+            pass
+
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
+
+    def health_check(self) -> dict:
+        """Verify database is accessible and return table counts."""
+        try:
+            with self._get_conn() as conn:
+                tables = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+                result = {"status": "ok", "tables": {}}
+                for row in tables:
+                    name = row["name"]
+                    count = conn.execute(f"SELECT COUNT(*) FROM [{name}]").fetchone()[0]
+                    result["tables"][name] = count
+                journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                result["journal_mode"] = journal
+                return result
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
     def _init_tables(self) -> None:
         with self._get_conn() as conn:

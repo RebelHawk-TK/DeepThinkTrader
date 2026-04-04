@@ -17,7 +17,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from config import Config
 from utils.alpaca_data import AlpacaMarketData
 from utils.database import Database
-from utils.obsidian_seeking_alpha import ObsidianSeekingAlpha
+from utils.rate_limiter import RateLimiter
 from utils.seeking_alpha_rss import SeekingAlphaRSS
 from utils.twelve_data import TwelveData
 from utils.yahoo_fundamentals import YahooFundamentals
@@ -29,14 +29,25 @@ class ResearchAgent:
     def __init__(self, db: Database | None = None):
         self.config = Config()
         self.db = db or Database()
+        self.rate_limiter = RateLimiter()
         self.alpaca_data = AlpacaMarketData(self.db)
         self.twelve_data = TwelveData() if self.config.RAPIDAPI_KEY else None
         self.yahoo_fundamentals = YahooFundamentals()
-        self.obsidian_sa = ObsidianSeekingAlpha(
-            vault_path=self.config.OBSIDIAN_VAULT_PATH,
-            max_age_days=self.config.OBSIDIAN_SA_MAX_AGE_DAYS,
-        )
         self.sa_rss = SeekingAlphaRSS()
+
+        # Seeking Alpha email source: Gmail API (default) or vault file scan (legacy)
+        if self.config.SA_SOURCE == "gmail" and self.config.SABRINA_API_KEY:
+            from utils.gmail_seeking_alpha import GmailSeekingAlpha
+            self.obsidian_sa = GmailSeekingAlpha()
+            logger.info(f"SA emails: Gmail mode (label:{self.config.SA_GMAIL_LABEL}, account:{self.config.SA_EMAIL_ACCOUNT})")
+        else:
+            from utils.obsidian_seeking_alpha import ObsidianSeekingAlpha
+            self.obsidian_sa = ObsidianSeekingAlpha(
+                vault_path=self.config.OBSIDIAN_VAULT_PATH,
+                max_age_days=self.config.OBSIDIAN_SA_MAX_AGE_DAYS,
+            )
+            logger.info("SA emails: Vault scan mode (legacy)")
+
         self.newsapi = NewsApiClient(api_key=self.config.NEWSAPI_KEY)
         self.vader = SentimentIntensityAnalyzer()
 
@@ -54,7 +65,10 @@ class ResearchAgent:
 
     def fetch_news(self, ticker: str, hours: int = 24) -> list[dict]:
         """Fetch recent news articles for a ticker from NewsAPI."""
+        if not self.rate_limiter.can_call_newsapi():
+            return []
         try:
+            self.rate_limiter.record_newsapi_call()
             from_date = (datetime.now() - timedelta(hours=hours)).strftime("%Y-%m-%d")
             response = self.newsapi.get_everything(
                 q=ticker,

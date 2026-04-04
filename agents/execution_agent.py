@@ -21,6 +21,7 @@ from alpaca.trading.requests import (
 
 from config import Config
 from utils.database import Database
+from utils.notifications import notify_trade_executed, notify_trade_exited
 from utils.risk_manager import RiskManager
 
 logger = logging.getLogger(__name__)
@@ -571,6 +572,10 @@ class ExecutionAgent:
                 f"ORDER EXECUTED — {action} {shares}x {ticker} @ ~${current_price} | "
                 f"SL: ${stop_price} | TP: ${target_price} | Edges: {edges_firing}/3 | "
                 f"Order ID: {alpaca_order_id} | Risk: ${risk_amount}"
+            )
+            notify_trade_executed(
+                ticker, action, shares, current_price, conviction,
+                reasoning=trade_summary[:200] if trade_summary else "",
             )
 
             return {
@@ -1161,6 +1166,7 @@ class ExecutionAgent:
                     self.db.update_trade_quantity(trade["id"], new_qty)
                     self.db.update_daily_pnl(partial_pnl, partial_pnl > 0)
 
+                    notify_trade_exited(ticker, reason, partial_pnl, partial=True)
                     logger.info(
                         f"PARTIAL EXIT — {ticker}: {exit_qty} shares @ ${current} | "
                         f"{reason} | P&L: ${partial_pnl:.2f} | Remaining: {new_qty}"
@@ -1196,6 +1202,7 @@ class ExecutionAgent:
                     resp.raise_for_status()
                     self.db.close_trade(trade["id"], current, pnl, exit_reason=reason)
                     self.db.update_daily_pnl(pnl, pnl > 0)
+                    notify_trade_exited(ticker, reason, pnl)
                     logger.info(
                         f"EXIT — {ticker}: {reason} | P&L: ${pnl:.2f} | X-Request-ID: {req_id}"
                     )

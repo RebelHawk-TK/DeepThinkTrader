@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import os
+import signal
 import sys
 import time
 from datetime import datetime
@@ -18,6 +19,8 @@ from agents.scanner_agent import ScannerAgent
 from config import Config
 from utils.database import Database
 from utils.market_clock import get_market_clock
+from utils.notifications import notify_strategy_paused, notify_strategy_resumed, notify_system_event
+from utils.state import StateManager
 
 # Configure logging with rotation (10MB max, 5 backups)
 _log_file = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
@@ -46,14 +49,15 @@ class DeepThinkTrader:
     def __init__(self):
         self.config = Config()
         self.db = Database()
+        self.state = StateManager()
         self.research = ResearchAgent(self.db)
         self.deepthink = DeepThinkAgent(self.db)
         logger.info("Using rule-based DeepThink analysis")
         self.execution = ExecutionAgent(self.db)
         self.scanner = ScannerAgent(self.db)
         self.clock = get_market_clock()
-        self._last_scan_date: str = ""
-        self._paused_portfolios: set[str] = set()
+        self._last_scan_date: str = self.state.last_scan_date
+        self._paused_portfolios: set[str] = self.state.paused_portfolios
 
     def _run_scan(self) -> list[str]:
         """Run full-universe scan every cycle. Fast (~60s) thanks to batch API calls."""
@@ -64,6 +68,7 @@ class DeepThinkTrader:
             if self._last_scan_date != today:
                 self._dynamic_watchlist = self.scanner.build_sector_watchlist()
                 self._last_scan_date = today
+                self.state.last_scan_date = today
 
             discovered = self.scanner.scan()
             if discovered:
@@ -255,6 +260,8 @@ class DeepThinkTrader:
             )
             if perf["win_rate_delta"] < -0.15:
                 self._paused_portfolios.add(portfolio)
+                self.state.pause_portfolio(portfolio)
+                notify_strategy_paused(portfolio, perf["win_rate_delta"])
                 logger.warning(
                     f"STRATEGY PAUSED [{portfolio}]: Win rate dropped "
                     f"{abs(perf['win_rate_delta'])*100:.0f}% from baseline — "
@@ -263,6 +270,8 @@ class DeepThinkTrader:
             elif portfolio in self._paused_portfolios:
                 # Recovery: unpause if win rate delta has improved
                 self._paused_portfolios.discard(portfolio)
+                self.state.resume_portfolio(portfolio)
+                notify_strategy_resumed(portfolio, perf["win_rate_delta"])
                 logger.info(
                     f"STRATEGY RESUMED [{portfolio}]: Win rate delta recovered to "
                     f"{perf['win_rate_delta']*100:+.0f}% — trading re-enabled"
@@ -318,7 +327,31 @@ class DeepThinkTrader:
 
 
 def main():
+    # Validate configuration before doing anything
+    errors, warnings = Config.validate()
+    for w in warnings:
+        logger.warning(f"Config warning: {w}")
+    if errors:
+        for e in errors:
+            logger.error(f"Config error: {e}")
+        logger.error("Fix configuration errors above before starting. Exiting.")
+        sys.exit(1)
+    logger.info("Configuration validated OK")
+
     trader = DeepThinkTrader()
+
+    notify_system_event(f"Started (mode: {Config.TRADE_MODE})")
+
+    # Graceful shutdown: save state on SIGTERM/SIGINT
+    def _shutdown(signum, frame):
+        sig_name = signal.Signals(signum).name
+        logger.info(f"Received {sig_name} — saving state and shutting down")
+        trader.state.save()
+        notify_system_event(f"Shutting down ({sig_name})")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
 
     if len(sys.argv) > 1:
         command = sys.argv[1]

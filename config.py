@@ -160,12 +160,19 @@ class Config:
     EARNINGS_EXIT_DAYS: int = int(os.getenv("EARNINGS_EXIT_DAYS", "2"))
     EARNINGS_EXIT_MODE: str = os.getenv("EARNINGS_EXIT_MODE", "close")
 
-    # Obsidian Vault (Seeking Alpha emails)
+    # Obsidian Vault (Seeking Alpha emails — legacy, replaced by Gmail mode)
     OBSIDIAN_VAULT_PATH: str = os.getenv(
         "OBSIDIAN_VAULT_PATH",
         os.path.expanduser("~/Documents/TKSabrinaIncVault"),
     )
     OBSIDIAN_SA_MAX_AGE_DAYS: int = int(os.getenv("OBSIDIAN_SA_MAX_AGE_DAYS", "7"))
+
+    # ── Seeking Alpha via Gmail ───────────────────────────────────
+    SA_EMAIL_ACCOUNT: str = os.getenv("SA_EMAIL_ACCOUNT", "tom@brigitteandtom.com")
+    SA_GMAIL_LABEL: str = os.getenv("SA_GMAIL_LABEL", "SA")
+    SA_SOURCE: str = os.getenv("SA_SOURCE", "gmail")  # "gmail" or "vault"
+    SABRINA_API_URL: str = os.getenv("SABRINA_API_URL", "https://api.sabrinainc.ai")
+    SABRINA_API_KEY: str = _secret("sabrina_api_key", "TOM_API_KEY")
 
     # Baseline date — dashboard ignores Alpaca portfolio history before this date
     BASELINE_DATE: str = os.getenv("BASELINE_DATE", "2026-03-24")
@@ -175,3 +182,66 @@ class Config:
 
     # Subreddits to scan
     SUBREDDITS: list[str] = ["wallstreetbets", "stocks", "investing"]
+
+    # ── Notifications ─────────────────────────────────────────────
+    NOTIFICATIONS_ENABLED: bool = os.getenv("NOTIFICATIONS_ENABLED", "false").lower() == "true"
+    SLACK_WEBHOOK_URL: str = os.getenv("SLACK_WEBHOOK_URL", "")
+
+    # ── Rate Limiting ─────────────────────────────────────────────
+    NEWSAPI_DAILY_LIMIT: int = int(os.getenv("NEWSAPI_DAILY_LIMIT", "100"))
+
+    @classmethod
+    def validate(cls) -> tuple[list[str], list[str]]:
+        """Validate configuration. Returns (fatal_errors, warnings)."""
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        # Required API keys
+        if not cls.ALPACA_API_KEY:
+            errors.append("ALPACA_API_KEY is required")
+        if not cls.ALPACA_SECRET_KEY:
+            errors.append("ALPACA_SECRET_KEY is required")
+        if not cls.NEWSAPI_KEY:
+            warnings.append("NEWSAPI_KEY not set — news research will fail")
+
+        # Trade mode
+        if cls.TRADE_MODE not in TRADE_MODES:
+            errors.append(f"TRADE_MODE '{cls.TRADE_MODE}' invalid — must be one of: {', '.join(TRADE_MODES)}")
+
+        # Paper trading safety
+        if "paper" not in cls.ALPACA_BASE_URL.lower():
+            warnings.append(
+                f"ALPACA_BASE_URL does not contain 'paper' ({cls.ALPACA_BASE_URL}) "
+                "— are you sure you want LIVE trading?"
+            )
+
+        # Numeric ranges
+        range_checks = [
+            ("MAX_RISK_PER_TRADE", cls.MAX_RISK_PER_TRADE, 0, 1.0),
+            ("MAX_DAILY_LOSS", cls.MAX_DAILY_LOSS, 0, 1.0),
+            ("MIN_CONVICTION", cls.MIN_CONVICTION, 0, 10),
+            ("MIN_REWARD_RISK_RATIO", cls.MIN_REWARD_RISK_RATIO, 0, 100),
+            ("MAX_POSITION_PCT", cls.MAX_POSITION_PCT, 0, 1.0),
+            ("MAX_DRAWDOWN_HALT_PCT", cls.MAX_DRAWDOWN_HALT_PCT, 0, 1.0),
+            ("KELLY_SAFETY_MULTIPLIER", cls.KELLY_SAFETY_MULTIPLIER, 0, 1.0),
+            ("MAX_RISK_OF_RUIN_PCT", cls.MAX_RISK_OF_RUIN_PCT, 0, 1.0),
+            ("MIN_EDGES_REQUIRED", cls.MIN_EDGES_REQUIRED, 1, 3),
+            ("MAX_SECTOR_EXPOSURE_PCT", cls.MAX_SECTOR_EXPOSURE_PCT, 0, 1.0),
+        ]
+        for name, value, low, high in range_checks:
+            if not (low <= value <= high):
+                errors.append(f"{name}={value} out of range [{low}, {high}]")
+
+        # Positive integers
+        if cls.MAX_OPEN_POSITIONS < 1:
+            errors.append(f"MAX_OPEN_POSITIONS must be >= 1 (got {cls.MAX_OPEN_POSITIONS})")
+        if cls.RESEARCH_INTERVAL_MINUTES < 1:
+            errors.append(f"RESEARCH_INTERVAL_MINUTES must be >= 1 (got {cls.RESEARCH_INTERVAL_MINUTES})")
+        if cls.EXIT_CHECK_INTERVAL_MINUTES < 1:
+            errors.append(f"EXIT_CHECK_INTERVAL_MINUTES must be >= 1 (got {cls.EXIT_CHECK_INTERVAL_MINUTES})")
+
+        # Optional warnings
+        if cls.NOTIFICATIONS_ENABLED and not cls.SLACK_WEBHOOK_URL:
+            warnings.append("NOTIFICATIONS_ENABLED=true but SLACK_WEBHOOK_URL is empty")
+
+        return errors, warnings
