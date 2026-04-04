@@ -574,7 +574,27 @@ if os.path.exists(bot_pid_path):
     except (ProcessLookupError, ValueError, OSError):
         pass
 
-st.sidebar.markdown(f"**Bot:** {'🟢 Running' if bot_running else '🔴 Stopped'}")
+if bot_running:
+    # Compute uptime from process start time
+    try:
+        import subprocess as _sp
+        _ps_out = _sp.check_output(["ps", "-o", "lstart=", "-p", str(pid)], text=True).strip()
+        _start_dt = dt.strptime(_ps_out, "%c")
+        _uptime_delta = dt.now() - _start_dt
+        _days = _uptime_delta.days
+        _hours = _uptime_delta.seconds // 3600
+        _mins = (_uptime_delta.seconds % 3600) // 60
+        if _days > 0:
+            _uptime_str = f"{_days}d {_hours}h {_mins}m"
+        elif _hours > 0:
+            _uptime_str = f"{_hours}h {_mins}m"
+        else:
+            _uptime_str = f"{_mins}m"
+        st.sidebar.markdown(f"**Bot:** 🟢 Running ({_uptime_str})")
+    except Exception:
+        st.sidebar.markdown("**Bot:** 🟢 Running")
+else:
+    st.sidebar.markdown("**Bot:** 🔴 Stopped")
 
 # Last activity from log
 last_activity = "Unknown"
