@@ -85,6 +85,34 @@ class Config:
     # RapidAPI
     RAPIDAPI_KEY: str = _secret("rapidapi_key", "RAPIDAPI_KEY")
 
+    # ── Additional News APIs ─────────────────────────────────────
+    STOCK_NEWS_API_ENABLED: bool = os.getenv("STOCK_NEWS_API_ENABLED", "true").lower() == "true"
+    STOCK_NEWS_API_KEY: str = _secret("stocknewsapi_key", "STOCK_NEWS_API_KEY")
+    TICKER_TICK_ENABLED: bool = os.getenv("TICKER_TICK_ENABLED", "true").lower() == "true"
+    FMP_ENABLED: bool = os.getenv("FMP_ENABLED", "true").lower() == "true"
+    FMP_API_KEY: str = _secret("fmp_api_key", "FMP_API_KEY")
+    MARKETAUX_ENABLED: bool = os.getenv("MARKETAUX_ENABLED", "true").lower() == "true"
+    MARKETAUX_API_KEY: str = _secret("marketaux_api_key", "MARKETAUX_API_KEY")
+    ALPHA_VANTAGE_ENABLED: bool = os.getenv("ALPHA_VANTAGE_ENABLED", "true").lower() == "true"
+    ALPHA_VANTAGE_API_KEY: str = _secret("alphavantage_api_key", "ALPHA_VANTAGE_API_KEY")
+    NEWS_CACHE_TTL_MINUTES: int = int(os.getenv("NEWS_CACHE_TTL_MINUTES", "30"))
+
+    @classmethod
+    def get_news_config(cls) -> dict:
+        """Return dict of news-related config for NewsAggregator initialization."""
+        return {
+            "STOCK_NEWS_API_ENABLED": cls.STOCK_NEWS_API_ENABLED,
+            "STOCK_NEWS_API_KEY": cls.STOCK_NEWS_API_KEY,
+            "TICKER_TICK_ENABLED": cls.TICKER_TICK_ENABLED,
+            "FMP_ENABLED": cls.FMP_ENABLED,
+            "FMP_API_KEY": cls.FMP_API_KEY,
+            "MARKETAUX_ENABLED": cls.MARKETAUX_ENABLED,
+            "MARKETAUX_API_KEY": cls.MARKETAUX_API_KEY,
+            "ALPHA_VANTAGE_ENABLED": cls.ALPHA_VANTAGE_ENABLED,
+            "ALPHA_VANTAGE_API_KEY": cls.ALPHA_VANTAGE_API_KEY,
+            "NEWS_CACHE_TTL_MINUTES": cls.NEWS_CACHE_TTL_MINUTES,
+        }
+
     # Trading parameters (mode-driven, with env var override)
     ACCOUNT_SIZE: float = float(os.getenv("ACCOUNT_SIZE", "50000"))
     WATCHLIST: list[str] = os.getenv("WATCHLIST", "NVDA,TSLA,AAPL,AMD,SPY").split(",")

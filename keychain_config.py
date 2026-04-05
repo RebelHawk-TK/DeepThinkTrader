@@ -37,6 +37,11 @@ SECRET_KEYS = {
     "reddit_client_secret": "REDDIT_CLIENT_SECRET",
     "anthropic_api_key": "ANTHROPIC_API_KEY",
     "rapidapi_key": "RAPIDAPI_KEY",
+    # Additional news APIs
+    "stocknewsapi_key": "STOCK_NEWS_API_KEY",
+    "fmp_api_key": "FMP_API_KEY",
+    "marketaux_api_key": "MARKETAUX_API_KEY",
+    "alphavantage_api_key": "ALPHA_VANTAGE_API_KEY",
 }
 
 

@@ -17,6 +17,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from config import Config
 from utils.alpaca_data import AlpacaMarketData
 from utils.database import Database
+from utils.news_feeds import NewsAggregator
 from utils.rate_limiter import RateLimiter
 from utils.seeking_alpha_rss import SeekingAlphaRSS
 from utils.twelve_data import TwelveData
@@ -50,6 +51,13 @@ class ResearchAgent:
 
         self.newsapi = NewsApiClient(api_key=self.config.NEWSAPI_KEY)
         self.vader = SentimentIntensityAnalyzer()
+
+        # Multi-source news aggregator (5 additional APIs)
+        try:
+            self.news_aggregator = NewsAggregator(Config.get_news_config())
+        except Exception as e:
+            logger.warning(f"NewsAggregator init failed: {e}")
+            self.news_aggregator = None
 
         # Reddit is optional — skip if credentials not configured
         if self.config.REDDIT_CLIENT_ID and self.config.REDDIT_CLIENT_ID != "your_reddit_client_id":
@@ -280,6 +288,21 @@ class ResearchAgent:
         logger.info(f"Generating research report for {ticker}...")
 
         news = self.fetch_news(ticker)
+
+        # Fetch from additional news sources (5 APIs via aggregator)
+        aggregated_articles = []
+        agg_sentiment = 0.0
+        if self.news_aggregator:
+            try:
+                aggregated_articles = self.news_aggregator.fetch_news(ticker, priority="medium")
+                agg_sentiment = self.news_aggregator.compute_sentiment(aggregated_articles)
+                logger.info(
+                    f"Aggregated news for {ticker}: {len(aggregated_articles)} articles, "
+                    f"sentiment={agg_sentiment:+.3f}"
+                )
+            except Exception as e:
+                logger.error(f"NewsAggregator error for {ticker}: {e}")
+
         reddit = self.fetch_reddit_sentiment(ticker)
         technicals = self.fetch_technicals(ticker)
 
@@ -344,9 +367,18 @@ class ResearchAgent:
             }
 
         # Calculate combined scores
-        news_impact = (
+        newsapi_impact = (
             round(sum(a["impact_score"] for a in news) / len(news), 1) if news else 0
         )
+        # Blend NewsAPI score with aggregated multi-source sentiment
+        # newsapi_impact is -10..+10, agg_sentiment is -1..+1; normalize both to -1..+1
+        if news and aggregated_articles:
+            # Both available: weighted blend (NewsAPI 40%, aggregated 60%)
+            news_impact = round((newsapi_impact / 10) * 0.4 + agg_sentiment * 0.6, 3) * 10
+        elif aggregated_articles:
+            news_impact = round(agg_sentiment * 10, 1)
+        else:
+            news_impact = newsapi_impact
         reddit_score = reddit["overall_sentiment"]
 
         # Combined catalyst score: news 30%, reddit 20%, basic technicals 20%, advanced 30%
@@ -403,7 +435,7 @@ class ResearchAgent:
             sa_score = max(-1.0, min(1.0, sa_score))
 
         # Dynamically reweight when data sources are unavailable
-        has_news = len(news) > 0
+        has_news = len(news) > 0 or len(aggregated_articles) > 0
         has_reddit = self.reddit is not None and reddit["post_count"] > 0
         has_adv = bool(advanced_technicals)
 
@@ -587,6 +619,13 @@ class ResearchAgent:
             "reddit_sentiment_score": reddit_score,
             "combined_catalyst_score": combined,
             "news_articles": news[:5],
+            "aggregated_news": {
+                "article_count": len(aggregated_articles),
+                "sentiment": round(agg_sentiment, 3),
+                "sources_used": list({a.source_api.value for a in aggregated_articles}),
+                "top_headlines": [a.headline for a in aggregated_articles[:5]],
+                "budget": self.news_aggregator.get_budget_status() if self.news_aggregator else {},
+            },
             "reddit_data": reddit,
             "technicals": technicals,
             "advanced_technicals": advanced_technicals,
