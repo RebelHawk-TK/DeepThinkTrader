@@ -49,21 +49,19 @@ class GmailSeekingAlpha:
         query = f"label:{self._label} after:{after_date}"
 
         try:
-            resp = http_requests.post(
+            resp = http_requests.get(
                 f"{self._api_url}/api/gmail/search",
-                json={
+                params={
                     "query": query,
                     "account_email": self._account,
                     "max_results": 50,
-                    "include_body": True,
-                    "body_max_chars": 5000,
                 },
                 headers={"X-API-Key": self._api_key},
                 timeout=30,
             )
             if resp.ok:
                 data = resp.json()
-                messages = data.get("messages", data.get("results", []))
+                messages = data.get("emails", data.get("messages", data.get("results", [])))
                 logger.info(f"Gmail SA search: {len(messages)} emails with label:{self._label} (last {self._max_age_days}d)")
                 return messages
             else:

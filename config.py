@@ -89,7 +89,7 @@ class Config:
     STOCK_NEWS_API_ENABLED: bool = os.getenv("STOCK_NEWS_API_ENABLED", "true").lower() == "true"
     STOCK_NEWS_API_KEY: str = _secret("stocknewsapi_key", "STOCK_NEWS_API_KEY")
     TICKER_TICK_ENABLED: bool = os.getenv("TICKER_TICK_ENABLED", "true").lower() == "true"
-    FMP_ENABLED: bool = os.getenv("FMP_ENABLED", "true").lower() == "true"
+    FMP_ENABLED: bool = os.getenv("FMP_ENABLED", "false").lower() == "true"  # free tier no longer includes news
     FMP_API_KEY: str = _secret("fmp_api_key", "FMP_API_KEY")
     MARKETAUX_ENABLED: bool = os.getenv("MARKETAUX_ENABLED", "true").lower() == "true"
     MARKETAUX_API_KEY: str = _secret("marketaux_api_key", "MARKETAUX_API_KEY")
