@@ -228,6 +228,20 @@ class DeepThinkTrader:
         except Exception as e:
             logger.error(f"Exit check error: {e}", exc_info=True)
 
+    def _refresh_sa_emails(self) -> None:
+        """Refresh Seeking Alpha email cache — runs 24/7 independent of market hours."""
+        try:
+            data = self.research.obsidian_sa.scan_all()
+            # Force cache refresh by clearing it first
+            self.research.obsidian_sa._cache = None
+            self.research.obsidian_sa._cache_time = None
+            data = self.research.obsidian_sa.scan_all()
+            tickers = len(data)
+            mentions = sum(len(v) for v in data.values())
+            logger.info(f"SA email refresh: {tickers} tickers, {mentions} mentions")
+        except Exception as e:
+            logger.error(f"SA email refresh error: {e}")
+
     def _guarded_cycle(self) -> None:
         """Only run analysis cycle during market hours."""
         self.clock.log_status()
@@ -301,6 +315,11 @@ class DeepThinkTrader:
                          f"Max positions: {self.config.PENNY_MAX_OPEN_POSITIONS} | "
                          f"R:R ratio: {self.config.PENNY_MIN_REWARD_RISK_RATIO}:1")
 
+        # SA email scan runs 24/7 — fetch intelligence even outside market hours
+        self._refresh_sa_emails()
+        schedule.every(60).minutes.do(self._refresh_sa_emails)
+        logger.info("SA email scan: every 60 minutes (24/7)")
+
         # Run immediately if market is open
         self._guarded_cycle()
 
@@ -313,14 +332,18 @@ class DeepThinkTrader:
         while True:
             schedule.run_pending()
 
-            # Sync to market open: if market opens within 60s, wait and run immediately
+            # Sync to market open: run cycle right at 9:30 ET
             mins_to_open = self.clock.minutes_until_open()
-            if mins_to_open is not None and 0 < mins_to_open <= 1:
-                logger.info(f"Market opens in {mins_to_open:.0f} min — waiting for 9:30 ET...")
-                time.sleep(max(10, mins_to_open * 60))
+            if mins_to_open is not None and 0 < mins_to_open <= 2:
+                # Within 2 min of open — wait precisely and fire
+                wait_secs = max(5, mins_to_open * 60)
+                logger.info(f"Market opens in {mins_to_open:.1f} min — waiting {wait_secs:.0f}s for 9:30 ET...")
+                time.sleep(wait_secs)
                 self._guarded_cycle()
+            elif mins_to_open is not None and 0 < mins_to_open <= 10:
+                # Within 10 min of open — poll every 5s to catch the window
+                time.sleep(5)
             elif mins_to_open is not None and 0 < mins_to_open <= 30:
-                # Within 30 min of open — poll every 10s instead of 30s
                 time.sleep(10)
             else:
                 time.sleep(30)

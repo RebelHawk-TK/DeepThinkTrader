@@ -939,6 +939,7 @@ _bench_period = st.segmented_control(
     options=list(_PERIOD_OPTIONS.keys()),
     default="5 D",
     key="bench_period",
+    label_visibility="collapsed",
 )
 if not _bench_period:
     _bench_period = "5 D"
@@ -1049,6 +1050,14 @@ if _port_hist and _port_hist.get("equity") and benchmark_data:
         if len(eq) == 0 or len(bot_dates) == 0:
             st.info("No market-hours data yet for this period.")
         else:
+            # Skip leading settlement artifacts: initial cash-only snapshots
+            # before positions are reflected (e.g. $35K cash vs $90K with positions)
+            if len(eq) > 2:
+                median_eq = sorted(eq)[len(eq) // 2]
+                while len(eq) > 2 and eq[0] < median_eq * 0.6:
+                    eq = eq[1:]
+                    bot_dates = bot_dates[1:]
+
             bot_base = eq[0]
             bot_pct = [((e - bot_base) / bot_base) * 100 for e in eq]
 
@@ -1091,9 +1100,9 @@ if _port_hist and _port_hist.get("equity") and benchmark_data:
             fig_bench.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
 
             fig_bench.update_layout(
-                title=None,
+                title="",
                 yaxis_title="Return %",
-                xaxis_title=None,
+                xaxis_title="",
                 height=400,
                 template="plotly_dark",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
