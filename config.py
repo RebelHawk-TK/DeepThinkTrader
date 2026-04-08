@@ -122,7 +122,7 @@ class Config:
         "MAX_DAILY_LOSS", str(_mode["MAX_DAILY_LOSS"])))
     MIN_CONVICTION: float = float(os.getenv(
         "MIN_CONVICTION", str(_mode["MIN_CONVICTION"])))
-    RESEARCH_INTERVAL_MINUTES: int = int(os.getenv("RESEARCH_INTERVAL_MINUTES", "60"))
+    RESEARCH_INTERVAL_MINUTES: int = int(os.getenv("RESEARCH_INTERVAL_MINUTES", "15"))
     MIN_REWARD_RISK_RATIO: float = float(os.getenv(
         "MIN_REWARD_RISK_RATIO", str(_mode["MIN_REWARD_RISK_RATIO"])))
     MAX_POSITION_PCT: float = float(os.getenv(
@@ -134,6 +134,8 @@ class Config:
     SCANNER_TOP_N: int = int(os.getenv(
         "SCANNER_TOP_N", str(_mode["SCANNER_TOP_N"])))
     SCANNER_MIN_REL_STRENGTH: float = float(os.getenv("SCANNER_MIN_REL_STRENGTH", "-5.0"))
+    SCANNER_MIN_RVOL: float = float(os.getenv("SCANNER_MIN_RVOL", "1.5"))
+    SCANNER_MIN_SOURCES: int = int(os.getenv("SCANNER_MIN_SOURCES", "1"))
 
     # ── Penny Stock Portfolio Parameters ──────────────────────────
     PENNY_MAX_RISK_PER_TRADE: float = float(os.getenv("PENNY_MAX_RISK_PER_TRADE", "0.03"))

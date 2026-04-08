@@ -18,6 +18,7 @@ from config import Config
 from utils.alpaca_data import AlpacaMarketData
 from utils.database import Database
 from utils.news_feeds import NewsAggregator
+from utils.options_flow import OptionsFlowMonitor
 from utils.rate_limiter import RateLimiter
 from utils.seeking_alpha_rss import SeekingAlphaRSS
 from utils.twelve_data import TwelveData
@@ -59,6 +60,12 @@ class ResearchAgent:
             logger.warning(f"NewsAggregator init failed: {e}")
             self.news_aggregator = None
 
+        # Options flow monitor (yfinance, free)
+        self.options_monitor = OptionsFlowMonitor(cache_ttl_minutes=15)
+
+        # Research report cache — avoids redundant API calls on 15min cycles
+        self._report_cache: dict[str, dict] = {}
+
         # Reddit is optional — skip if credentials not configured
         if self.config.REDDIT_CLIENT_ID and self.config.REDDIT_CLIENT_ID != "your_reddit_client_id":
             self.reddit = praw.Reddit(
@@ -83,7 +90,7 @@ class ResearchAgent:
                 from_param=from_date,
                 language="en",
                 sort_by="relevancy",
-                page_size=20,
+                page_size=5,
             )
             articles = []
             for article in response.get("articles", [])[:10]:
@@ -285,6 +292,22 @@ class ResearchAgent:
 
     def generate_report(self, ticker: str) -> dict:
         """Generate a full research report combining all sources."""
+        # Research cache: reuse recent report if price hasn't moved >2%
+        cached = self._report_cache.get(ticker)
+        if cached:
+            age_secs = (datetime.now() - cached["time"]).total_seconds()
+            if age_secs < 900:  # 15 minutes
+                try:
+                    import yfinance as _yf
+                    snap_price = _yf.Ticker(ticker).fast_info.get("lastPrice", 0)
+                    if snap_price and cached["price"] > 0:
+                        price_change = abs(snap_price - cached["price"]) / cached["price"]
+                        if price_change < 0.02:
+                            logger.info(f"Cache hit for {ticker} (age={age_secs:.0f}s, move={price_change:.1%})")
+                            return cached["report"]
+                except Exception:
+                    pass
+
         logger.info(f"Generating research report for {ticker}...")
 
         news = self.fetch_news(ticker)
@@ -366,6 +389,13 @@ class ResearchAgent:
                 "rss_bearish": sa_rss_intel.get("bearish_count", 0),
             }
 
+        # Fetch options flow (unusual activity detection)
+        options_flow = {}
+        try:
+            options_flow = self.options_monitor.scan_unusual_activity(ticker)
+        except Exception as e:
+            logger.error(f"Options flow error for {ticker}: {e}")
+
         # Calculate combined scores
         newsapi_impact = (
             round(sum(a["impact_score"] for a in news) / len(news), 1) if news else 0
@@ -434,27 +464,36 @@ class ResearchAgent:
                 sa_score *= 1.3
             sa_score = max(-1.0, min(1.0, sa_score))
 
+        # Options flow score (-1..+1)
+        opt_score = options_flow.get("signal_strength", 0.0) if options_flow else 0.0
+        has_options = bool(options_flow and options_flow.get("unusual_strikes", 0) > 0)
+
         # Dynamically reweight when data sources are unavailable
         has_news = len(news) > 0 or len(aggregated_articles) > 0
         has_reddit = self.reddit is not None and reddit["post_count"] > 0
         has_adv = bool(advanced_technicals)
 
-        # Base weights: news 25%, reddit 15%, tech 20%, advanced 25%, SA 15%
+        # Base weights: news 20%, reddit 10%, options 15%, tech 20%, advanced 20%, SA 15%
         if has_news and has_reddit:
-            w_news, w_reddit, w_tech, w_adv, w_sa = 0.25, 0.15, 0.20, 0.25, 0.15
+            w_news, w_reddit, w_opt, w_tech, w_adv, w_sa = 0.20, 0.10, 0.15, 0.20, 0.20, 0.15
         elif has_news:
-            w_news, w_reddit, w_tech, w_adv, w_sa = 0.30, 0.0, 0.25, 0.25, 0.20
+            w_news, w_reddit, w_opt, w_tech, w_adv, w_sa = 0.25, 0.0, 0.15, 0.20, 0.20, 0.20
         elif has_reddit:
-            w_news, w_reddit, w_tech, w_adv, w_sa = 0.0, 0.20, 0.30, 0.30, 0.20
+            w_news, w_reddit, w_opt, w_tech, w_adv, w_sa = 0.0, 0.15, 0.15, 0.25, 0.25, 0.20
         else:
-            w_news, w_reddit, w_tech, w_adv, w_sa = 0.0, 0.0, 0.35, 0.40, 0.25
+            w_news, w_reddit, w_opt, w_tech, w_adv, w_sa = 0.0, 0.0, 0.20, 0.30, 0.30, 0.20
+
+        if not has_options:
+            # Redistribute options weight to news and tech
+            w_news += w_opt * 0.5
+            w_tech += w_opt * 0.5
+            w_opt = 0.0
 
         if not has_adv:
             w_tech += w_adv
             w_adv = 0.0
 
         if not has_sa:
-            # Redistribute SA weight to news and tech
             w_news += w_sa * 0.5
             w_tech += w_sa * 0.5
             w_sa = 0.0
@@ -462,6 +501,7 @@ class ResearchAgent:
         combined = round(
             (news_impact / 10 * w_news)
             + (reddit_score * w_reddit)
+            + (opt_score * w_opt)
             + (tech_score * w_tech)
             + (adv_score * w_adv)
             + (sa_score * w_sa),
@@ -606,6 +646,17 @@ class ResearchAgent:
             elif breadth < 0.4:
                 risks.append(f"Narrow breadth ({breadth:.0%} advancing) — weak participation")
 
+        # Options flow risks/opportunities
+        if options_flow:
+            if options_flow.get("bullish_flow"):
+                pc = options_flow.get("put_call_ratio", 1.0)
+                prem = options_flow.get("total_unusual_premium", 0)
+                opportunities.append(f"Bullish options flow (P/C={pc:.2f}, unusual premium ${prem:,.0f})")
+            elif options_flow.get("bearish_flow"):
+                pc = options_flow.get("put_call_ratio", 1.0)
+                prem = options_flow.get("total_unusual_premium", 0)
+                risks.append(f"Bearish options flow (P/C={pc:.2f}, unusual premium ${prem:,.0f})")
+
         # Pad to at least 3 each
         while len(risks) < 3:
             risks.append("No additional risk factors identified")
@@ -631,13 +682,22 @@ class ResearchAgent:
             "advanced_technicals": advanced_technicals,
             "fundamentals": fundamentals,
             "seeking_alpha": sa_intel,
+            "options_flow": options_flow,
             "market_regime": market_regime,
             "risks": risks[:7],
-            "opportunities": opportunities[:5],
+            "opportunities": opportunities[:7],
         }
 
         # Save to database
         self.db.save_research(ticker, report)
         logger.info(f"Research report saved for {ticker} (catalyst: {combined})")
+
+        # Cache report for 15min cycle reuse
+        current_price = technicals.get("current_price", 0)
+        self._report_cache[ticker] = {
+            "report": report,
+            "time": datetime.now(),
+            "price": current_price,
+        }
 
         return report

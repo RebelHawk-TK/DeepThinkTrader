@@ -488,6 +488,17 @@ class ScannerAgent:
             prev_volume = snap.get("prev_volume", 0)
             vol_ratio = volume / prev_volume if prev_volume > 0 else 1.0
 
+            # RVOL gate: skip stocks below minimum relative volume (in-play filter)
+            min_rvol = getattr(self.config, "SCANNER_MIN_RVOL", 1.5)
+            if vol_ratio < min_rvol:
+                continue
+
+            # Discovery source gate: require at least 1 catalyst signal
+            sources = source_counts.get(ticker, 0)
+            min_sources = getattr(self.config, "SCANNER_MIN_SOURCES", 1)
+            if sources < min_sources:
+                continue
+
             # Phase 7d: RSI from daily bars
             db = daily_bars.get(ticker, [])
             rsi = self._calc_rsi_from_bars(db) if db else None
