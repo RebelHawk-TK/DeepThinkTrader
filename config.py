@@ -91,7 +91,7 @@ class Config:
     TICKER_TICK_ENABLED: bool = os.getenv("TICKER_TICK_ENABLED", "true").lower() == "true"
     FMP_ENABLED: bool = os.getenv("FMP_ENABLED", "false").lower() == "true"  # free tier no longer includes news
     FMP_API_KEY: str = _secret("fmp_api_key", "FMP_API_KEY")
-    MARKETAUX_ENABLED: bool = os.getenv("MARKETAUX_ENABLED", "true").lower() == "true"
+    MARKETAUX_ENABLED: bool = os.getenv("MARKETAUX_ENABLED", "false").lower() == "true"  # 401 — email never verified
     MARKETAUX_API_KEY: str = _secret("marketaux_api_key", "MARKETAUX_API_KEY")
     ALPHA_VANTAGE_ENABLED: bool = os.getenv("ALPHA_VANTAGE_ENABLED", "true").lower() == "true"
     ALPHA_VANTAGE_API_KEY: str = _secret("alphavantage_api_key", "ALPHA_VANTAGE_API_KEY")

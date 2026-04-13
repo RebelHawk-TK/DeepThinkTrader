@@ -34,7 +34,7 @@ class Database:
     def _get_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA busy_timeout=15000")  # 15s timeout — dashboard concurrency
         return conn
 
     def health_check(self) -> dict:
@@ -452,6 +452,18 @@ class Database:
             return row["w"] / row["n"]
         return None
 
+    @staticmethod
+    def _json_safe(obj):
+        """Convert numpy types to native Python for JSON serialization."""
+        import numpy as np
+        if isinstance(obj, (np.bool_, np.integer)):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
     def save_research(self, ticker: str, report: dict, portfolio: str = "main") -> int:
         with self._get_conn() as conn:
             cursor = conn.execute(
@@ -465,7 +477,7 @@ class Database:
                     report.get("news_impact_score", 0),
                     report.get("reddit_sentiment_score", 0),
                     report.get("combined_catalyst_score", 0),
-                    json.dumps(report),
+                    json.dumps(report, default=self._json_safe),
                     portfolio,
                 ),
             )
