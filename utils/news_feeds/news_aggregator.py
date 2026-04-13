@@ -1,7 +1,7 @@
 """News aggregator — parallel fetching, deduplication, caching, budget-aware routing."""
 
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
@@ -102,21 +102,26 @@ class NewsAggregator:
         if not sources:
             return []
 
-        # Parallel fetch from selected sources
+        # Parallel fetch from selected sources (with timeout to prevent hangs)
         all_articles: list[NewsArticle] = []
         with ThreadPoolExecutor(max_workers=len(sources)) as executor:
             futures = {
                 executor.submit(self.clients[source].fetch_news, ticker, limit): source
                 for source in sources
             }
-            for future in as_completed(futures):
-                source = futures[future]
-                try:
-                    articles = future.result()
-                    all_articles.extend(articles)
-                    logger.debug("%s returned %d articles for %s", source.value, len(articles), ticker)
-                except Exception as e:
-                    logger.error("Fetch failed for %s/%s: %s", source.value, ticker, e)
+            try:
+                for future in as_completed(futures, timeout=20):
+                    source = futures[future]
+                    try:
+                        articles = future.result(timeout=2)
+                        all_articles.extend(articles)
+                        logger.debug("%s returned %d articles for %s", source.value, len(articles), ticker)
+                    except TimeoutError:
+                        logger.warning("Result retrieval timed out for %s/%s", source.value, ticker)
+                    except Exception as e:
+                        logger.error("Fetch failed for %s/%s: %s", source.value, ticker, e)
+            except TimeoutError:
+                logger.warning("News aggregation timed out for %s after 20s — using partial results", ticker)
 
         # Deduplicate
         deduped = self._deduplicate(all_articles)

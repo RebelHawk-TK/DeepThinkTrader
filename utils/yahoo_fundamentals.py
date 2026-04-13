@@ -6,11 +6,28 @@ All free via yfinance. No API key required.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 
 import yfinance as yf
 
 logger = logging.getLogger(__name__)
+
+_YF_TIMEOUT = 15  # seconds — prevents yfinance hangs on illiquid tickers
+
+
+def _yf_with_timeout(fn, timeout=_YF_TIMEOUT, default=None):
+    """Run a yfinance call with a timeout. Returns default on timeout/error."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            logger.warning(f"yfinance call timed out after {timeout}s")
+            return default
+        except Exception as e:
+            logger.debug(f"yfinance call failed: {e}")
+            return default
 
 
 class YahooFundamentals:
@@ -21,7 +38,7 @@ class YahooFundamentals:
 
         try:
             stock = yf.Ticker(ticker)
-            info = stock.info or {}
+            info = _yf_with_timeout(lambda: stock.info, default={}) or {}
 
             # Key financials
             result["financials"] = {
@@ -112,7 +129,7 @@ class YahooFundamentals:
 
             # Upcoming earnings date
             try:
-                cal = stock.calendar
+                cal = _yf_with_timeout(lambda: stock.calendar, default=None)
                 if cal is not None:
                     if isinstance(cal, dict):
                         earn_date = cal.get("Earnings Date")
@@ -165,8 +182,8 @@ class YahooFundamentals:
     def _get_insider_data(self, stock: yf.Ticker) -> dict:
         """Summarize recent insider buying/selling."""
         try:
-            insiders = stock.insider_transactions
-            if insiders is None or insiders.empty:
+            insiders = _yf_with_timeout(lambda: stock.insider_transactions, default=None)
+            if insiders is None or (hasattr(insiders, 'empty') and insiders.empty):
                 return {"activity": "no data"}
 
             recent = insiders.head(20)
@@ -212,7 +229,7 @@ class YahooFundamentals:
         """
         try:
             stock = yf.Ticker(ticker)
-            info = stock.info or {}
+            info = _yf_with_timeout(lambda: stock.info, default={}) or {}
 
             criteria_met = 0
             details = []
@@ -265,7 +282,7 @@ class YahooFundamentals:
         """Get next earnings date and days until for earnings proximity checks."""
         try:
             stock = yf.Ticker(ticker)
-            cal = stock.calendar
+            cal = _yf_with_timeout(lambda: stock.calendar, default=None)
             if cal is None:
                 return {"next_date": None, "days_until": None}
 
@@ -290,13 +307,13 @@ class YahooFundamentals:
     def _get_institutional_data(self, stock: yf.Ticker) -> dict:
         """Summarize institutional ownership."""
         try:
-            info = stock.info or {}
+            info = _yf_with_timeout(lambda: stock.info, default={}) or {}
             result = {
                 "held_pct": info.get("heldPercentInstitutions"),
                 "insider_held_pct": info.get("heldPercentInsiders"),
             }
 
-            holders = stock.institutional_holders
+            holders = _yf_with_timeout(lambda: stock.institutional_holders, default=None)
             if holders is not None and not holders.empty:
                 result["top_holders"] = len(holders)
                 result["top_holder_name"] = holders.iloc[0].get("Holder", "Unknown")

@@ -5,6 +5,7 @@ ratios, and tracks unusual premium to identify institutional positioning.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime, timedelta
 
 import yfinance as yf
@@ -32,7 +33,17 @@ class OptionsFlowMonitor:
         if cached and cached["expires"] > datetime.utcnow():
             return cached["data"]
 
-        result = self._scan(ticker)
+        # Run scan with timeout to prevent yfinance hangs
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._scan, ticker)
+            try:
+                result = future.result(timeout=30)
+            except TimeoutError:
+                logger.error(f"Options flow scan timed out for {ticker} after 30s")
+                result = self._empty_result()
+            except Exception as e:
+                logger.error(f"Options flow scan failed for {ticker}: {e}")
+                result = self._empty_result()
 
         self._cache[ticker] = {
             "data": result,
@@ -40,8 +51,9 @@ class OptionsFlowMonitor:
         }
         return result
 
-    def _scan(self, ticker: str) -> dict:
-        empty = {
+    @staticmethod
+    def _empty_result() -> dict:
+        return {
             "bullish_flow": False,
             "bearish_flow": False,
             "put_call_ratio": 1.0,
@@ -53,6 +65,9 @@ class OptionsFlowMonitor:
             "unusual_calls": [],
             "unusual_puts": [],
         }
+
+    def _scan(self, ticker: str) -> dict:
+        empty = self._empty_result()
 
         try:
             stock = yf.Ticker(ticker)

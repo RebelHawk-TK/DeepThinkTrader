@@ -329,8 +329,14 @@ class DeepThinkTrader:
         # Phase 2a: Schedule fast exit checks every 5 minutes
         schedule.every(exit_interval).minutes.do(self._check_exits_only)
 
+        _heartbeat_counter = 0
         while True:
             schedule.run_pending()
+
+            # Heartbeat: log every ~60s so freezes are detectable
+            _heartbeat_counter += 1
+            if _heartbeat_counter % 2 == 0:  # Every ~60s (2 × 30s sleep)
+                logger.debug(f"Heartbeat: alive, {len(schedule.jobs)} jobs scheduled")
 
             # Sync to market open: run cycle right at 9:30 ET
             mins_to_open = self.clock.minutes_until_open()

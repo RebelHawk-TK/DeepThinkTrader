@@ -72,6 +72,7 @@ class ResearchAgent:
                 client_id=self.config.REDDIT_CLIENT_ID,
                 client_secret=self.config.REDDIT_CLIENT_SECRET,
                 user_agent=self.config.REDDIT_USER_AGENT,
+                timeout=10,
             )
             logger.info("Reddit (PRAW) initialized")
         else:
