@@ -223,9 +223,10 @@ class YahooFundamentals:
             return {"activity": "no data"}
 
     def evaluate_fundamental_edge(self, ticker: str) -> dict:
-        """Phase 3a: Score fundamental edge — pass/fail + strength (0-4).
+        """Phase 3a: Score fundamental edge — pass/fail + strength (0-5).
 
-        Checks: P/E below sector median, ROE > 15%, earnings growth > 10%, debt/equity manageable.
+        Checks: P/E reasonable, forward P/E improving, ROE > 12%, earnings growth > 10%, debt manageable.
+        Requires 2/5 criteria to pass (loosened from 3/4 to allow growth stocks).
         """
         try:
             stock = yf.Ticker(ticker)
@@ -234,39 +235,40 @@ class YahooFundamentals:
             criteria_met = 0
             details = []
 
-            # 1. P/E below 5-year sector median (proxy: PE < 20 or forward PE < current PE)
+            # 1. P/E below 35 (allows growth stocks, rejects extreme speculation)
             pe = info.get("trailingPE")
-            forward_pe = info.get("forwardPE")
-            if pe and pe < 20:
+            if pe and 0 < pe < 35:
                 criteria_met += 1
                 details.append(f"P/E {pe:.1f} (reasonable)")
-            elif forward_pe and pe and forward_pe < pe:
+
+            # 2. Forward P/E improving (earnings expected to grow)
+            forward_pe = info.get("forwardPE")
+            if forward_pe and pe and forward_pe < pe:
                 criteria_met += 1
                 details.append(f"Forward P/E improving ({forward_pe:.1f} vs {pe:.1f})")
 
-            # 2. ROE > 15% (proxy for ROIC > WACC)
+            # 3. ROE > 12% (lowered from 15% — proxy for ROIC > WACC)
             roe = info.get("returnOnEquity")
-            if roe and roe > 0.15:
+            if roe and roe > 0.12:
                 criteria_met += 1
                 details.append(f"ROE {roe*100:.1f}%")
 
-            # 3. Earnings growth > 10% YoY
+            # 4. Earnings or revenue growth > 10% YoY
             earnings_growth = info.get("earningsGrowth") or info.get("revenueGrowth")
             if earnings_growth and earnings_growth > 0.10:
                 criteria_met += 1
                 details.append(f"Growth {earnings_growth*100:.1f}%")
 
-            # 4. Debt/equity < 100 (reasonable)
+            # 5. Debt/equity < 150 (loosened from 100 — many quality companies carry more)
             de = info.get("debtToEquity")
-            if de is not None and de < 100:
+            if de is not None and de < 150:
                 criteria_met += 1
                 details.append(f"D/E {de:.0f}")
             elif de is None:
-                # No debt data for some stocks (financials, etc.) — pass by default
                 criteria_met += 1
                 details.append("D/E N/A (pass)")
 
-            passed = criteria_met >= 3
+            passed = criteria_met >= 2
             return {
                 "passed": passed,
                 "strength": criteria_met,
