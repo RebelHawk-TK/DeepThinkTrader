@@ -33,7 +33,7 @@ class ResearchAgent:
         self.db = db or Database()
         self.rate_limiter = RateLimiter()
         self.alpaca_data = AlpacaMarketData(self.db)
-        self.twelve_data = TwelveData() if self.config.RAPIDAPI_KEY else None
+        self.twelve_data = None  # Disabled — rate limits block 15min cycles. yfinance covers technicals.
         self.yahoo_fundamentals = YahooFundamentals()
         self.sa_rss = SeekingAlphaRSS()
 
