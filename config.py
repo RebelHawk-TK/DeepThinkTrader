@@ -82,6 +82,10 @@ class Config:
     CLAUDE_ANALYSIS_ENABLED: bool = os.getenv("CLAUDE_ANALYSIS_ENABLED", "true").lower() == "true"
     CLAUDE_MODEL: str = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 
+    # Bull/Bear debate
+    DEBATE_ENABLED: bool = os.getenv("DEBATE_ENABLED", "true").lower() == "true"
+    DEBATE_ROUNDS: int = int(os.getenv("DEBATE_ROUNDS", "2"))
+
     # RapidAPI
     RAPIDAPI_KEY: str = _secret("rapidapi_key", "RAPIDAPI_KEY")
 

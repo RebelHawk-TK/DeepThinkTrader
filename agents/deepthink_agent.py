@@ -19,6 +19,16 @@ class DeepThinkAgent:
         self.yahoo = YahooFundamentals()
         self.claude = ClaudeAnalyst()
 
+        # Bull/Bear debate engine
+        self.debate_engine = None
+        if getattr(self.config, "DEBATE_ENABLED", False) and self.config.ANTHROPIC_API_KEY:
+            from utils.debate_engine import DebateEngine
+            self.debate_engine = DebateEngine(
+                model=self.config.CLAUDE_MODEL,
+                api_key=self.config.ANTHROPIC_API_KEY,
+            )
+            logger.info("Bull/Bear debate engine initialized")
+
     def _score_factors(self, report: dict) -> tuple[list[dict], list[dict]]:
         """Extract and score bullish/bearish factors from research report."""
         bullish = []
@@ -508,13 +518,43 @@ class DeepThinkAgent:
             action = "HOLD"
             edge_reason = "Conviction below threshold"
 
-        # Step 8: Claude qualitative analysis — adjusts conviction and can override action
+        # Step 8a: Bull/Bear debate — adversarial analysis before Claude review
+        debate_result = None
+        if self.debate_engine:
+            try:
+                pre_debate = {
+                    "action": action, "conviction": conviction,
+                    "bullish_factors": bullish, "bearish_factors": bearish,
+                    "edge_details": edge_details,
+                }
+                debate_result = self.debate_engine.run_debate(
+                    report=report,
+                    rule_analysis=pre_debate,
+                    rounds=getattr(self.config, "DEBATE_ROUNDS", 2),
+                )
+                if debate_result:
+                    debate_conv = debate_result["conviction"]
+                    # Blend: 60% rule-based, 40% debate
+                    conviction = round(conviction * 0.6 + debate_conv * 0.4, 1)
+                    conviction = max(1.0, min(10.0, conviction))
+                    # Override action if judge disagrees strongly
+                    if debate_result["decision"] != action and debate_conv >= 7.0:
+                        logger.warning(
+                            f"DEBATE OVERRIDE for {ticker}: {action} → {debate_result['decision']} "
+                            f"(judge conviction {debate_conv}, winner: {debate_result['winning_side']})"
+                        )
+                        action = debate_result["decision"]
+            except Exception as e:
+                logger.error(f"Debate failed for {ticker}: {e}")
+
+        # Step 8b: Claude qualitative analysis — final review after debate
         claude_analysis = {}
         if self.claude.enabled:
             pre_claude_analysis = {
                 "action": action, "conviction": conviction,
                 "bullish_factors": bullish, "bearish_factors": bearish,
                 "edge_details": edge_details,
+                "debate": debate_result,
             }
             claude_analysis = self.claude.analyze_trade(report, pre_claude_analysis)
 
@@ -580,6 +620,7 @@ class DeepThinkAgent:
                 {"label": e["label"], "passed": e["passed"], "strength": e["strength"], "details": e["details"]}
                 for e in edge_details
             ],
+            "debate": debate_result,
             "claude_analysis": claude_analysis if claude_analysis else None,
         }
 
