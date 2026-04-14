@@ -950,7 +950,23 @@ class ExecutionAgent:
                 })
 
         except Exception as e:
-            logger.error(f"DB SYNC failed for {ticker}: {e}")
+            # Retry once after 2s — DB lock is the most common failure
+            logger.warning(f"DB SYNC failed for {ticker}: {e} — retrying in 2s")
+            import time
+            time.sleep(2)
+            try:
+                # Simplified retry: just close the trade at last known price
+                import yfinance as yf
+                try:
+                    last_price = float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+                except Exception:
+                    last_price = entry
+                pnl = round((last_price - entry) * qty, 2) if is_long else round((entry - last_price) * qty, 2)
+                self.db.close_trade(trade_id, last_price, pnl, exit_reason="alpaca_reconcile_retry")
+                logger.info(f"DB SYNC retry succeeded for {ticker} — closed at ${last_price:.2f}, P&L: ${pnl:+.2f}")
+                exits.append({"trade_id": trade_id, "ticker": ticker, "reason": "alpaca_reconcile_retry", "pnl": pnl})
+            except Exception as e2:
+                logger.error(f"DB SYNC retry also failed for {ticker}: {e2}")
 
     def check_exit_conditions(self) -> list[dict]:
         """Check open positions against SL, TP, trailing stops, time stops, momentum, and earnings."""
