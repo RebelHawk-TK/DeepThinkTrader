@@ -18,7 +18,34 @@ from _build_brand import (
 )
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo", "banner.png")
+AI_BG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo", "banner-bg.png")
 W, H = 1600, 400
+
+
+def _ai_background() -> Image.Image | None:
+    """Load the AI-generated background if present; crop-fit to W x H."""
+    if not os.path.exists(AI_BG):
+        return None
+    raw = Image.open(AI_BG).convert("RGB")
+    # Scale so shorter side matches then center-crop to W x H
+    sw, sh = raw.size
+    scale = max(W / sw, H / sh)
+    new = raw.resize((int(sw * scale), int(sh * scale)), Image.LANCZOS)
+    nw, nh = new.size
+    left = (nw - W) // 2
+    top = (nh - H) // 2
+    cropped = new.crop((left, top, left + W, top + H))
+
+    # Darken the left third slightly so the white wordmark has contrast
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay)
+    for x in range(int(W * 0.55)):
+        t = 1 - x / (W * 0.55)
+        a = int(110 * t)
+        odraw.line([(x, 0), (x, H)], fill=(0, 0, 0, a))
+    overlay = overlay.filter(ImageFilter.GaussianBlur(radius=40))
+    cropped = Image.alpha_composite(cropped.convert("RGBA"), overlay).convert("RGB")
+    return cropped
 
 
 def _background() -> Image.Image:
@@ -113,11 +140,12 @@ def _overlay_wordmark(bg: Image.Image) -> Image.Image:
 
 
 def main():
-    bg = _background()
+    bg = _ai_background() or _background()
+    source = "AI (banner-bg.png)" if _ai_background() else "procedural"
     final = _overlay_wordmark(bg)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     final.save(OUT)
-    print(f"wrote {OUT}")
+    print(f"wrote {OUT} — background: {source}")
 
 
 if __name__ == "__main__":
