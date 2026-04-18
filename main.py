@@ -403,6 +403,16 @@ class DeepThinkTrader:
 
 
 def main():
+    # If ACTIVE_USER_EMAIL is set, override Config's Alpaca keys with the
+    # user's encrypted credentials from user_secrets. Silently no-ops when
+    # the env var is unset, the user row is missing, or no keys are stored —
+    # in which case Config keeps whatever env/keychain gave it.
+    try:
+        from utils.secrets_vault import bootstrap_active_user_keys
+        bootstrap_active_user_keys()
+    except Exception as exc:
+        logger.warning(f"user_secrets bootstrap failed, using env keys: {exc}")
+
     # Validate configuration before doing anything
     errors, warnings = Config.validate()
     for w in warnings:
