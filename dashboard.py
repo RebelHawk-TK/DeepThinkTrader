@@ -43,7 +43,10 @@ from utils.dashboard_widgets import (
     render_status_banner,
 )
 
-st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="wide")
+from utils.brand import ICON_PATH, BANNER_PATH
+
+st.set_page_config(page_title="DeepThinkTrader", page_icon=ICON_PATH, layout="wide")
+st.image(BANNER_PATH, use_container_width=True)
 
 # ── Global Theme & CSS ──────────────────────────────────────
 st.markdown("""<style>

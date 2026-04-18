@@ -16,7 +16,8 @@ import streamlit as st
 from config import Config
 from utils.database import Database
 
-st.set_page_config(page_title="Trade Detail", page_icon="📊", layout="wide")
+from utils.brand import ICON_PATH as _ICON
+st.set_page_config(page_title="Trade Detail", page_icon=_ICON, layout="wide")
 
 # ── Chart Theme (consistent with dashboard.py) ──────────────
 CHART_COLORS = {

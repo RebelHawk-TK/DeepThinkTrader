@@ -3,7 +3,11 @@ title: Trader Bot — Onboarding Guide
 subtitle: trader.travelforge.ai
 author: Tom King
 date: April 2026
+header-includes:
+  - \usepackage{graphicx}
 ---
+
+![](brand/logo/banner.png){width=100%}
 
 # Welcome
 

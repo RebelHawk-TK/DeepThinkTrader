@@ -107,11 +107,13 @@ def _format_ts(raw) -> str:
 
 user = require_auth()
 if user["role"] != "admin":
-    st.set_page_config(page_title="Admin", page_icon="🔒")
+    from utils.brand import ICON_PATH as _IC
+    st.set_page_config(page_title="Admin", page_icon=_IC)
     st.error("This page is admin-only.")
     st.stop()
 
-st.set_page_config(page_title="Admin", page_icon="🛠️", layout="wide")
+from utils.brand import ICON_PATH as _ICON
+st.set_page_config(page_title="Admin", page_icon=_ICON, layout="wide")
 st.title("Admin — User Access")
 st.caption(
     "Invite a friend/family member below — we'll grant them IAP access and "

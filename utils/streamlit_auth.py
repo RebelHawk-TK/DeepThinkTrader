@@ -129,7 +129,8 @@ def require_auth() -> dict:
     user = _load_user(email) or _upsert_from_iap(email)
 
     if not user["enabled"]:
-        st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="centered")
+        from utils.brand import ICON_PATH
+        st.set_page_config(page_title="DeepThinkTrader", page_icon=ICON_PATH, layout="centered")
         st.markdown("### Account pending approval")
         st.write(
             f"Hi {user['email']} — an admin needs to enable your account "

@@ -55,7 +55,8 @@ def _test_alpaca(key_id: str, secret: str) -> tuple[bool, str]:
 
 
 user = require_auth()
-st.set_page_config(page_title="Settings", page_icon="⚙️", layout="centered")
+from utils.brand import ICON_PATH as _ICON
+st.set_page_config(page_title="Settings", page_icon=_ICON, layout="centered")
 st.title("Settings — Alpaca API Keys")
 st.caption(
     "Paste your Alpaca **paper** API credentials below. We test them against "

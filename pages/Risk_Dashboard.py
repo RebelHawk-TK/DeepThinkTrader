@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import Config
 from utils.database import Database
 
-st.set_page_config(page_title="Risk Dashboard", page_icon="⚠️", layout="wide")
+from utils.brand import ICON_PATH as _ICON
+st.set_page_config(page_title="Risk Dashboard", page_icon=_ICON, layout="wide")
 
 # ── Chart Theme ──────────────────────────────────────────────
 CHART_COLORS = {

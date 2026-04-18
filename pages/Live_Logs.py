@@ -8,7 +8,8 @@ from datetime import datetime
 
 import streamlit as st
 
-st.set_page_config(page_title="DeepThinkTrader — Live Logs", page_icon="📋", layout="wide")
+from utils.brand import ICON_PATH as _ICON
+st.set_page_config(page_title="DeepThinkTrader — Live Logs", page_icon=_ICON, layout="wide")
 
 LOG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_FILES = {
