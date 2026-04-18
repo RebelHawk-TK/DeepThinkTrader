@@ -113,7 +113,9 @@ if user["role"] != "admin":
     st.stop()
 
 from utils.brand import ICON_PATH as _ICON
+from utils.theme import apply_theme
 st.set_page_config(page_title="Admin", page_icon=_ICON, layout="wide")
+apply_theme()
 st.title("Admin — User Access")
 st.caption(
     "Invite a friend/family member below — we'll grant them IAP access and "

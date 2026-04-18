@@ -19,29 +19,8 @@ from utils.database import Database
 from utils.brand import ICON_PATH as _ICON
 st.set_page_config(page_title="Trade Detail", page_icon=_ICON, layout="wide")
 
-# ── Chart Theme (consistent with dashboard.py) ──────────────
-CHART_COLORS = {
-    "primary": "#6c63ff",
-    "secondary": "#00d4aa",
-    "positive": "#4caf50",
-    "negative": "#f44336",
-    "neutral": "#8892b0",
-    "accent": "#ffd700",
-    "bg": "#0e1117",
-    "grid": "#1a1a2e",
-    "text": "#ccd6f6",
-}
-
-CHART_LAYOUT = dict(
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="#0e1117",
-    font=dict(family="'SF Mono', 'Fira Code', monospace", color="#ccd6f6", size=12),
-    xaxis=dict(gridcolor="#1a1a2e", showgrid=True, gridwidth=1),
-    yaxis=dict(gridcolor="#1a1a2e", showgrid=True, gridwidth=1),
-    margin=dict(l=0, r=0, t=30, b=0),
-    legend=dict(bgcolor="rgba(0,0,0,0)"),
-)
+from utils.theme import CHART_COLORS, CHART_LAYOUT, apply_theme
+apply_theme()
 
 def apply_chart_theme(fig):
     """Apply consistent dark theme to any Plotly figure."""

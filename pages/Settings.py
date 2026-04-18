@@ -56,7 +56,9 @@ def _test_alpaca(key_id: str, secret: str) -> tuple[bool, str]:
 
 user = require_auth()
 from utils.brand import ICON_PATH as _ICON
+from utils.theme import apply_theme
 st.set_page_config(page_title="Settings", page_icon=_ICON, layout="centered")
+apply_theme()
 st.title("Settings — Alpaca API Keys")
 st.caption(
     "Paste your Alpaca **paper** API credentials below. We test them against "
@@ -77,7 +79,9 @@ if status:
         f"(saved {status['updated_at']})"
     )
 else:
-    st.info("No keys saved yet. Enter them below.")
+    from utils.brand import HERO_NO_KEYS
+    st.image(HERO_NO_KEYS, use_container_width=True)
+    st.info("No keys saved yet. Enter them below to connect your Alpaca paper account.")
 
 with st.form("alpaca_keys_form", clear_on_submit=True):
     key_id = st.text_input(

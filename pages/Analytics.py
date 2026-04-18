@@ -16,28 +16,8 @@ from utils.database import Database
 from utils.brand import ICON_PATH as _ICON
 st.set_page_config(page_title="DeepThinkTrader — Analytics", page_icon=_ICON, layout="wide")
 
-# ── Chart Theme ────────────────────────────────────────────────
-CHART_COLORS = {
-    "primary": "#6c63ff",
-    "secondary": "#00d4aa",
-    "positive": "#4caf50",
-    "negative": "#f44336",
-    "neutral": "#8892b0",
-    "accent": "#ffd700",
-    "bg": "#0e1117",
-    "grid": "#1a1a2e",
-    "text": "#ccd6f6"
-}
-
-CHART_LAYOUT = dict(
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="#0e1117",
-    font=dict(family="'SF Mono', 'Fira Code', monospace", color="#ccd6f6", size=12),
-    xaxis=dict(gridcolor="#1a1a2e"),
-    yaxis=dict(gridcolor="#1a1a2e"),
-    margin=dict(l=0, r=0, t=30, b=0)
-)
+from utils.theme import CHART_COLORS, CHART_LAYOUT, apply_theme
+apply_theme()
 
 db = Database()
 

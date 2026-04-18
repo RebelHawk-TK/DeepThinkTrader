@@ -44,136 +44,11 @@ from utils.dashboard_widgets import (
 )
 
 from utils.brand import ICON_PATH, BANNER_PATH
+from utils.theme import apply_theme, BRAND
 
 st.set_page_config(page_title="DeepThinkTrader", page_icon=ICON_PATH, layout="wide")
 st.image(BANNER_PATH, use_container_width=True)
-
-# ── Global Theme & CSS ──────────────────────────────────────
-st.markdown("""<style>
-/* === Card containers === */
-.kpi-card {
-    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
-    border: 1px solid #2a2a4a;
-    border-radius: 12px;
-    padding: 20px 16px 16px;
-    margin-bottom: 12px;
-}
-.kpi-card-green {
-    background: linear-gradient(135deg, #0a2e1a 0%, #0e3e20 100%);
-    border: 1px solid #1a5a30;
-    border-radius: 12px;
-    padding: 20px 16px 16px;
-    margin-bottom: 12px;
-}
-.kpi-card-red {
-    background: linear-gradient(135deg, #2e1a1a 0%, #3e1616 100%);
-    border: 1px solid #5a1a1a;
-    border-radius: 12px;
-    padding: 20px 16px 16px;
-    margin-bottom: 12px;
-}
-.kpi-card-amber {
-    background: linear-gradient(135deg, #2e2a1a 0%, #3e3216 100%);
-    border: 1px solid #5a4a1a;
-    border-radius: 12px;
-    padding: 20px 16px 16px;
-    margin-bottom: 12px;
-}
-
-/* === Section headers === */
-.section-header {
-    font-size: 1.1rem;
-    font-weight: 700;
-    color: #8892b0;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    margin: 24px 0 12px;
-    padding-bottom: 8px;
-    border-bottom: 2px solid #2a2a4a;
-}
-
-/* === Status banner === */
-.status-banner {
-    padding: 10px 20px;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 14px;
-    text-align: center;
-    margin-bottom: 16px;
-}
-.status-active {
-    background: #0a2e1a;
-    border: 1px solid #1a5a30;
-    color: #4caf50;
-}
-.status-paused {
-    background: #2e1a1a;
-    border: 1px solid #5a1a1a;
-    color: #f44336;
-}
-
-/* === Metric styling overrides === */
-[data-testid="stMetric"] {
-    overflow: hidden;
-}
-[data-testid="stMetricValue"] {
-    font-size: clamp(1rem, 2.2vw, 1.8rem);
-    white-space: nowrap;
-    font-weight: 700;
-}
-[data-testid="stMetricLabel"] {
-    font-size: clamp(0.65rem, 1.2vw, 0.85rem);
-    color: #8892b0 !important;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-[data-testid="stMetricDelta"] {
-    font-size: clamp(0.6rem, 1vw, 0.8rem);
-}
-
-/* === Title === */
-h1 { font-size: clamp(1.4rem, 3vw, 2.2rem) !important; }
-
-/* === Subheaders with accent === */
-h2, h3 {
-    color: #ccd6f6 !important;
-}
-
-/* === Dividers === */
-hr {
-    border-color: #2a2a4a !important;
-    margin: 20px 0 !important;
-}
-
-/* === Expanders === */
-[data-testid="stExpander"] {
-    border: 1px solid #2a2a4a;
-    border-radius: 8px;
-    margin-bottom: 8px;
-}
-
-/* === Dataframe rows: P&L color hint via row hover === */
-.stDataFrame [data-testid="stDataFrameResizable"] {
-    border: 1px solid #2a2a4a;
-    border-radius: 8px;
-}
-
-/* === Sidebar polish === */
-[data-testid="stSidebar"] {
-    background: #0a0a1a;
-}
-[data-testid="stSidebar"] h2 {
-    font-size: 0.95rem !important;
-    color: #8892b0 !important;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-}
-
-/* === Tab styling === */
-.stTabs [data-baseweb="tab"] {
-    font-weight: 600;
-}
-</style>""", unsafe_allow_html=True)
+apply_theme()
 
 # ── Market Ticker Bar ──────────────────────────────────────
 @st.cache_data(ttl=60)
@@ -208,10 +83,10 @@ def _fetch_ticker_bar_data():
                 fmt = f"{price:,.2f}"
             else:
                 fmt = f"{price:.2f}"
-            color = "#4caf50" if change >= 0 else "#f44336"
+            color = BRAND["green"] if change >= 0 else BRAND["red"]
             arrow = "▲" if change >= 0 else "▼"
             items.append(
-                f'<span style="color:#e0e0e0;font-weight:600">{label}</span>&nbsp;'
+                f'<span style="color:{BRAND["text"]};font-weight:600">{label}</span>&nbsp;'
                 f'<span style="color:{color}">${fmt} {arrow} {abs(change):.2f}%</span>'
             )
         except Exception:
@@ -229,7 +104,8 @@ if _ticker_items:
     .ticker-wrap {{
         width: 100%;
         overflow: hidden;
-        background: #1a1a2e;
+        background: {BRAND["bg_raised"]};
+        border: 1px solid {BRAND["stroke"]};
         border-radius: 6px;
         padding: 8px 0;
         margin-bottom: 12px;
@@ -327,29 +203,7 @@ st.markdown("""
 
 YAHOO_URL = "https://finance.yahoo.com/quote"
 
-# Chart theme constants
-CHART_COLORS = {
-    "primary": "#6c63ff",
-    "secondary": "#00d4aa",
-    "positive": "#4caf50",
-    "negative": "#f44336",
-    "neutral": "#8892b0",
-    "accent": "#ffd700",
-    "bg": "#0e1117",
-    "grid": "#1a1a2e",
-    "text": "#ccd6f6",
-}
-
-CHART_LAYOUT = dict(
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="#0e1117",
-    font=dict(family="'SF Mono', 'Fira Code', monospace", color="#ccd6f6", size=12),
-    xaxis=dict(gridcolor="#1a1a2e", showgrid=True, gridwidth=1),
-    yaxis=dict(gridcolor="#1a1a2e", showgrid=True, gridwidth=1),
-    margin=dict(l=0, r=0, t=30, b=0),
-    legend=dict(bgcolor="rgba(0,0,0,0)"),
-)
+from utils.theme import CHART_COLORS, CHART_LAYOUT
 
 def apply_chart_theme(fig):
     """Apply consistent dark theme to any Plotly figure."""
@@ -1961,7 +1815,16 @@ if all_trades:
         apply_chart_theme(fig_cum)
         st.plotly_chart(fig_cum, use_container_width=True)
 else:
-    st.info("No trades yet")
+    from utils.brand import HERO_NO_TRADES
+    c1, c2, c3 = st.columns([1, 2, 1])
+    with c2:
+        st.image(HERO_NO_TRADES, use_container_width=True)
+    st.markdown(
+        "<p style='text-align:center;color:#7D8590;'>No trades yet — the bot "
+        "is warming up. First trades usually land within the first few market "
+        "sessions.</p>",
+        unsafe_allow_html=True,
+    )
 
 st.divider()
 
