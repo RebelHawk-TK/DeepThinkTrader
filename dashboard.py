@@ -18,9 +18,10 @@ from config import Config
 from utils.database import Database
 from utils.streamlit_auth import require_auth
 
-# Phase B cloud gate — no-op on Mac dev (DASHBOARD_AUTH_REQUIRED not set).
-# Must run before any data-sensitive rendering.
-require_auth()
+# Read identity from the X-Auth-Email header set by the auth proxy sidecar
+# (Mac dev bypass returns a synthetic admin). Admin-only features gate on
+# CURRENT_USER["role"] == "admin".
+CURRENT_USER = require_auth()
 
 from utils.dashboard_data import (
     compute_30day_pnl,

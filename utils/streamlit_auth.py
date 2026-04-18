@@ -1,74 +1,141 @@
-"""Dashboard access gate for cloud deployment.
+"""Reads the authenticated user from Google Cloud IAP's signed header.
 
-Phase B: single shared password pulled from GCP Secret Manager. Guards the
-Streamlit dashboard so only the operator can see live trade data. Phase D
-replaces this with per-user Firebase Auth tokens.
+Phase B+: the dashboard sits behind an HTTPS Load Balancer with Identity-
+Aware Proxy enabled. IAP handles Google OAuth at the edge and forwards
+`X-Goog-Authenticated-User-Email` on every authenticated request. Cloud
+Run ingress is restricted to internal + load-balancer traffic, so the
+header cannot be set by anyone other than IAP.
 
-Usage (in dashboard.py, before any other rendering):
+Header value format: `accounts.google.com:user@example.com` — we strip the
+prefix to get the bare email.
 
-    from utils.streamlit_auth import require_auth
-    require_auth()
-
-Opt in by setting env var DASHBOARD_AUTH_REQUIRED=1 on Cloud Run. On the Mac
-dev dashboard (no env var set) this is a no-op — local access is trusted.
+Mac dev: DASHBOARD_AUTH_REQUIRED unset → return a synthetic admin so the
+local dashboard experience is unchanged.
 """
 
 from __future__ import annotations
 
-import hmac
 import logging
 import os
-from functools import lru_cache
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+_IAP_EMAIL_HEADER = "X-Goog-Authenticated-User-Email"
 
 
 def _auth_required() -> bool:
     return os.getenv("DASHBOARD_AUTH_REQUIRED") == "1"
 
 
-@lru_cache(maxsize=1)
-def _expected_password() -> str:
-    """Fetch dashboard password from Secret Manager on first call."""
-    from utils.gcp_secrets import get_secret
+def _current_email_from_iap() -> str | None:
+    import streamlit as st
 
-    pw = get_secret("DASHBOARD_PASSWORD", env_fallback="DASHBOARD_PASSWORD")
-    if not pw:
-        logger.error(
-            "DASHBOARD_AUTH_REQUIRED=1 but DASHBOARD_PASSWORD secret not set — "
-            "dashboard will refuse all access until resolved."
+    try:
+        headers = st.context.headers  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    if not headers:
+        return None
+
+    raw = headers.get(_IAP_EMAIL_HEADER) or headers.get(_IAP_EMAIL_HEADER.lower())
+    if not raw:
+        return None
+    # IAP format: "accounts.google.com:user@example.com"
+    return raw.split(":", 1)[-1].strip().lower()
+
+
+def _load_user(email: str) -> dict | None:
+    from utils.database import Database
+
+    db = Database()
+    with db._get_conn() as conn:
+        row = conn.execute(
+            "SELECT email, name, picture_url, role, enabled FROM users WHERE email = ?",
+            (email.strip().lower(),),
+        ).fetchone()
+        if not row:
+            return None
+        return {
+            "email": row["email"],
+            "name": row["name"],
+            "picture_url": row["picture_url"],
+            "role": row["role"],
+            "enabled": bool(row["enabled"]),
+        }
+
+
+def _upsert_from_iap(email: str) -> dict:
+    """First sighting of an email via IAP → insert a row. Bootstrap admins via
+    the ADMIN_EMAILS env var (auto-enabled, role=admin)."""
+    from utils.database import Database
+
+    db = Database()
+    email_norm = email.strip().lower()
+    admins = {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+    is_admin = email_norm in admins
+
+    with db._get_conn() as conn:
+        row = conn.execute(
+            "SELECT id, role, enabled FROM users WHERE email = ?",
+            (email_norm,),
+        ).fetchone()
+        now = datetime.utcnow().isoformat()
+        if row:
+            conn.execute("UPDATE users SET last_login_at = ? WHERE email = ?", (now, email_norm))
+            if is_admin and row["role"] != "admin":
+                conn.execute(
+                    "UPDATE users SET role = 'admin', enabled = true WHERE email = ?",
+                    (email_norm,),
+                )
+                return {"email": email_norm, "name": None, "picture_url": None,
+                        "role": "admin", "enabled": True}
+            return {"email": email_norm, "name": None, "picture_url": None,
+                    "role": row["role"], "enabled": bool(row["enabled"])}
+        role = "admin" if is_admin else "user"
+        enabled = is_admin
+        conn.execute(
+            """INSERT INTO users (email, role, enabled, created_at, last_login_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (email_norm, role, enabled, now, now),
         )
-    # Defensive strip — Secret Manager values from `echo` uploads can have a
-    # stray trailing newline that breaks compare_digest silently.
-    return (pw or "").strip()
+        logger.info("new user via IAP: %s role=%s enabled=%s", email_norm, role, enabled)
+        return {"email": email_norm, "name": None, "picture_url": None,
+                "role": role, "enabled": enabled}
 
 
-def require_auth() -> None:
-    """Block dashboard rendering until the user authenticates."""
+def require_auth() -> dict:
+    """Return the current user, or stop the app with a helpful message."""
     if not _auth_required():
-        return
+        return {
+            "email": "dev@localhost",
+            "name": "Local Dev",
+            "picture_url": None,
+            "role": "admin",
+            "enabled": True,
+        }
 
     import streamlit as st
 
-    # Session-state gate — once authed, the rest of the app renders.
-    if st.session_state.get("_auth_ok"):
-        return
+    email = _current_email_from_iap()
+    if not email:
+        st.error(
+            "Not authenticated. This dashboard is only reachable through "
+            "the IAP-protected URL (https://trader.travelforge.ai)."
+        )
+        st.stop()
+        return {}
 
-    # Narrow, centered login card
-    st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="centered")
-    st.markdown("### DeepThinkTrader")
-    st.caption("Sign in to view trade history.")
+    user = _load_user(email) or _upsert_from_iap(email)
 
-    with st.form("login", clear_on_submit=False):
-        pw = st.text_input("Password", type="password")
-        submit = st.form_submit_button("Sign in")
+    if not user["enabled"]:
+        st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="centered")
+        st.markdown("### Account pending approval")
+        st.write(
+            f"Hi {user['email']} — an admin needs to enable your account "
+            "before you can see data."
+        )
+        st.stop()
+        return {}
 
-    if submit:
-        expected = _expected_password()
-        if expected and hmac.compare_digest(pw, expected):
-            st.session_state["_auth_ok"] = True
-            st.rerun()
-        else:
-            st.error("Invalid password.")
-
-    st.stop()
+    return user
