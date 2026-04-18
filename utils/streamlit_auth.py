@@ -38,7 +38,9 @@ def _expected_password() -> str:
             "DASHBOARD_AUTH_REQUIRED=1 but DASHBOARD_PASSWORD secret not set — "
             "dashboard will refuse all access until resolved."
         )
-    return pw or ""
+    # Defensive strip — Secret Manager values from `echo` uploads can have a
+    # stray trailing newline that breaks compare_digest silently.
+    return (pw or "").strip()
 
 
 def require_auth() -> None:
