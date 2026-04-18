@@ -1,23 +1,34 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from datetime import datetime
 
 from config import Config
+from utils import db_engine
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
     def __init__(self, db_path: str = Config.DB_PATH):
         self.db_path = db_path
-        self._enable_wal()
-        self._init_tables()
-        # Security: restrict database file permissions to owner only
-        try:
-            import os
-            os.chmod(self.db_path, 0o600)
-        except OSError:
-            pass
+
+        if db_engine.is_sqlite():
+            self._enable_wal()
+            self._init_tables()
+            # Security: restrict database file permissions to owner only
+            try:
+                import os
+                os.chmod(self.db_path, 0o600)
+            except OSError:
+                pass
+        else:
+            # Postgres path — alembic owns the schema. Verify the expected
+            # tables exist so a missing migration fails loud instead of
+            # crashing mid-query.
+            self._verify_pg_schema()
 
     def _enable_wal(self) -> None:
         """Enable Write-Ahead Logging for better concurrency and crash recovery."""
@@ -26,31 +37,61 @@ class Database:
             mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
             conn.close()
             if mode.lower() == "wal":
-                import logging
-                logging.getLogger(__name__).info(f"SQLite WAL mode enabled for {self.db_path}")
+                logger.info(f"SQLite WAL mode enabled for {self.db_path}")
         except Exception:
             pass
 
-    def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA busy_timeout=15000")  # 15s timeout — dashboard concurrency
-        return conn
+    def _verify_pg_schema(self) -> None:
+        """Fail fast if core tables missing on Postgres (alembic not run yet)."""
+        required = ("trades", "research_reports", "analysis_results")
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public'"
+            )
+            existing = {r["table_name"] for r in cur.fetchall()}
+        missing = [t for t in required if t not in existing]
+        if missing:
+            raise RuntimeError(
+                f"Postgres schema missing tables: {missing}. "
+                f"Run 'alembic upgrade head' before starting."
+            )
+
+    def _get_conn(self):
+        """Return a connection that behaves like sqlite3.Connection.
+
+        On SQLite this is a native sqlite3 connection. On Postgres it's a
+        wrapper that translates SQL on the fly. Callers should use as a
+        context manager to get commit-on-exit / rollback-on-error semantics.
+        """
+        return db_engine.get_conn(self.db_path)
 
     def health_check(self) -> dict:
         """Verify database is accessible and return table counts."""
         try:
             with self._get_conn() as conn:
-                tables = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                ).fetchall()
-                result = {"status": "ok", "tables": {}}
-                for row in tables:
+                if db_engine.is_postgres():
+                    rows = conn.execute(
+                        "SELECT table_name AS name FROM information_schema.tables "
+                        "WHERE table_schema = 'public'"
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+
+                result: dict = {"status": "ok", "tables": {}}
+                for row in rows:
                     name = row["name"]
-                    count = conn.execute(f"SELECT COUNT(*) FROM [{name}]").fetchone()[0]
-                    result["tables"][name] = count
-                journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
-                result["journal_mode"] = journal
+                    # Quoting matches both dialects for simple table names
+                    count = conn.execute(f'SELECT COUNT(*) AS n FROM "{name}"').fetchone()
+                    result["tables"][name] = count["n"] if count else 0
+
+                if db_engine.is_sqlite():
+                    journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+                    result["journal_mode"] = journal
+                else:
+                    result["dialect"] = "postgresql"
                 return result
         except Exception as e:
             return {"status": "error", "error": str(e)}
@@ -123,6 +164,7 @@ class Database:
             self._init_atr_history_table(conn)
             self._init_slippage_table(conn)
             self._init_edge_performance_table(conn)
+            self._init_reflections_table(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS alpaca_request_ids (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,6 +178,15 @@ class Database:
                     success INTEGER DEFAULT 1
                 )
             """)
+            # Indexes — dashboard queries filter heavily on these columns.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_portfolio ON trades(portfolio)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_ticker ON analysis_results(ticker)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_research_ticker ON research_reports(ticker)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reflections_ticker ON reflections(ticker)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at)")
 
     def _migrate_add_portfolio(self, conn: sqlite3.Connection) -> None:
         """Add portfolio column to existing tables if not present."""
@@ -270,9 +321,9 @@ class Database:
                            VALUES (?, ?, ?)""",
                         (ticker, date_str, atr_val),
                     )
-            log.info(f"Seeded {len(dates)} ATR values for {ticker} from yfinance")
+            logger.info(f"Seeded {len(dates)} ATR values for {ticker} from yfinance")
         except Exception as e:
-            log.warning(f"Failed to seed ATR history for {ticker}: {e}")
+            logger.warning(f"Failed to seed ATR history for {ticker}: {e}")
 
     def _init_slippage_table(self, conn: sqlite3.Connection) -> None:
         """Create slippage_records table for tracking fill quality."""
@@ -312,6 +363,80 @@ class Database:
                 FOREIGN KEY (trade_id) REFERENCES trades(id)
             )
         """)
+
+    def _init_reflections_table(self, conn: sqlite3.Connection) -> None:
+        """Post-trade lesson memory — feeds retrieval-augmented prompting.
+
+        Based on TradingAgents (arXiv:2412.20138) and FinMem (arXiv:2311.13743)
+        — both show post-trade reflection written back into agent context
+        materially improves Sharpe. Start simple: recency-based retrieval.
+        Semantic retrieval (embeddings) is a future extension.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reflections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_id INTEGER NOT NULL,
+                ticker TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                thesis TEXT NOT NULL,
+                outcome_pnl REAL NOT NULL,
+                outcome_label TEXT NOT NULL,
+                lesson TEXT NOT NULL,
+                FOREIGN KEY (trade_id) REFERENCES trades(id)
+            )
+        """)
+
+    def save_reflection(
+        self,
+        trade_id: int,
+        ticker: str,
+        thesis: str,
+        outcome_pnl: float,
+        lesson: str,
+    ) -> int:
+        """Persist a post-trade lesson. Returns reflection id."""
+        label = "win" if outcome_pnl > 0 else "loss" if outcome_pnl < 0 else "flat"
+        with self._get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO reflections
+                   (trade_id, ticker, created_at, thesis, outcome_pnl, outcome_label, lesson)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (trade_id, ticker, datetime.now().isoformat(),
+                 thesis[:2000], outcome_pnl, label, lesson[:2000]),
+            )
+            return cur.lastrowid or 0
+
+    def get_reflections(
+        self, ticker: str | None = None, limit: int = 5
+    ) -> list[dict]:
+        """Most recent reflections, optionally scoped to a ticker.
+
+        Tickered reflections come first (when ticker given), then global
+        recent lessons fill any remaining slots. This is the retrieval half
+        of the memory loop — keep it simple until a vector store lands.
+        """
+        rows: list[dict] = []
+        with self._get_conn() as conn:
+            if ticker:
+                tickered = conn.execute(
+                    """SELECT * FROM reflections
+                       WHERE ticker = ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (ticker, limit),
+                ).fetchall()
+                rows.extend(dict(r) for r in tickered)
+            remaining = limit - len(rows)
+            if remaining > 0:
+                seen_ids = {r["id"] for r in rows}
+                global_recent = conn.execute(
+                    """SELECT * FROM reflections
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (remaining + len(rows),),
+                ).fetchall()
+                for r in global_recent:
+                    if r["id"] not in seen_ids and len(rows) < limit:
+                        rows.append(dict(r))
+        return rows
 
     # ── Phase 8a: Slippage Analytics ───────────────────────────
 
@@ -659,6 +784,10 @@ class Database:
     def close_trade(
         self, trade_id: int, exit_price: float, pnl: float, exit_reason: str = ""
     ) -> None:
+        # Both writes happen on the SAME connection to avoid self-deadlock.
+        # Nested connections here caused SQLITE_BUSY: outer conn held the write
+        # lock for the UPDATE, second conn from save_edge_performance blocked
+        # forever until busy_timeout expired.
         with self._get_conn() as conn:
             conn.execute(
                 """UPDATE trades SET status = 'CLOSED', exit_price = ?,
@@ -686,17 +815,17 @@ class Database:
                         combo_parts.append("S")
                     edge_combo = "+".join(combo_parts) if combo_parts else "none"
 
-                    self.save_edge_performance(
-                        trade_id=trade_id,
-                        ticker=trade["ticker"],
-                        edge_combo=edge_combo,
-                        edges_fired=trade["edges_fired"] or 0,
-                        fund_passed=fund,
-                        tech_passed=tech,
-                        sent_passed=sent,
-                        conviction=trade["conviction"] or 0,
-                        pnl=pnl,
-                        portfolio=trade["portfolio"] or "main",
+                    # Inline the INSERT on the same conn — don't call save_edge_performance
+                    conn.execute(
+                        """INSERT INTO edge_performance
+                           (trade_id, ticker, timestamp, edge_combo, edges_fired,
+                            fund_passed, tech_passed, sent_passed, conviction, pnl, won, portfolio)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (trade_id, trade["ticker"], datetime.now().isoformat(), edge_combo,
+                         trade["edges_fired"] or 0,
+                         1 if fund else 0, 1 if tech else 0, 1 if sent else 0,
+                         trade["conviction"] or 0, pnl, 1 if pnl > 0 else 0,
+                         trade["portfolio"] or "main"),
                     )
                 except (json.JSONDecodeError, TypeError):
                     pass

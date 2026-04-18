@@ -8,3 +8,9 @@ venv/
 .venv/
 .trader.pid
 .dashboard.pid
+.env.compose
+
+# Phase B — additional runtime artifacts
+trades.db-wal
+trades.db-shm
+*.log.*

@@ -21,5 +21,20 @@
     <string>/Users/rebelhawk/Documents/Claude/StockTrader/dashboard.log</string>
     <key>StandardErrorPath</key>
     <string>/Users/rebelhawk/Documents/Claude/StockTrader/dashboard.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/rebelhawk/Documents/Claude/StockTrader/.venv/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
 </dict>
 </plist>

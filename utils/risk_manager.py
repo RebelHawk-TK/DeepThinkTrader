@@ -43,9 +43,16 @@ class RiskManager:
     def calculate_position_size(
         self, account_value: float, entry_price: float, stop_loss_pct: float,
         portfolio: str = "main",
+        ticker: str | None = None,
+        broker=None,
     ) -> int:
         """Calculate shares using fractional Kelly when enough history exists,
         falling back to fixed-risk sizing (1% of equity).
+
+        When `ticker` and `broker` are provided, the result is additionally
+        scaled by a correlation multiplier: a candidate highly correlated
+        with existing holdings gets 0.5x size. This is coarser than CVaR
+        but cheaper to compute on every trade.
         """
         if entry_price <= 0:
             return 0
@@ -54,15 +61,28 @@ class RiskManager:
         # Try Kelly sizing if we have enough trade history
         stats = self.db.get_strategy_stats(portfolio)
         if stats["trade_count"] >= 20 and stats["payoff_ratio"] > 0:
-            kelly_fraction = self._kelly_fraction(stats["win_rate"], stats["payoff_ratio"])
+            kelly_fraction = self._kelly_fraction(
+                stats["win_rate"], stats["payoff_ratio"], n_trades=stats["trade_count"],
+            )
             risk_pct = kelly_fraction
             logger.info(
                 f"Kelly sizing: f*={kelly_fraction:.4f} "
-                f"(win_rate={stats['win_rate']:.2f}, payoff={stats['payoff_ratio']:.2f})"
+                f"(win_rate={stats['win_rate']:.2f}, payoff={stats['payoff_ratio']:.2f}, "
+                f"N={stats['trade_count']})"
             )
         else:
             risk_pct = self.config.RISK_PCT_PER_TRADE
             logger.info(f"Fixed-risk sizing: {risk_pct*100:.1f}% (insufficient history: {stats['trade_count']} trades)")
+
+        # Correlation-aware scaling — applied before risk/value caps so we
+        # don't over-concentrate in a correlated cluster.
+        corr_mult = self._correlation_multiplier(ticker, broker)
+        if corr_mult < 1.0:
+            logger.info(
+                f"Correlation-aware size multiplier: {corr_mult:.2f}x "
+                f"(candidate: {ticker})"
+            )
+        risk_pct *= corr_mult
 
         risk_amount = account_value * risk_pct
         risk_per_share = entry_price * (stop_loss_pct / 100)
@@ -70,27 +90,78 @@ class RiskManager:
             return 0
         shares_by_risk = int(risk_amount / risk_per_share)
 
-        # Cap position value (mode-driven)
-        max_position_value = account_value * params["max_position_pct"]
+        # Cap position value (mode-driven); scale the cap by corr_mult too.
+        max_position_value = account_value * params["max_position_pct"] * corr_mult
         shares_by_value = int(max_position_value / entry_price)
 
         return max(0, min(shares_by_risk, shares_by_value))
 
-    def _kelly_fraction(self, win_rate: float, payoff_ratio: float) -> float:
-        """Fractional Kelly: f* = (p - q) / b × safety_multiplier.
+    def _correlation_multiplier(self, ticker: str | None, broker) -> float:
+        """Compute sizing multiplier based on correlation with held positions."""
+        if not ticker or broker is None:
+            return 1.0
+        try:
+            from analytics.correlation import (
+                average_correlation,
+                correlation_size_multiplier,
+            )
+            held = [t["ticker"] for t in self.db.get_open_trades()]
+            if not held:
+                return 1.0
+            avg = average_correlation(broker, ticker, held)
+            return correlation_size_multiplier(avg)
+        except Exception as e:
+            logger.warning(f"Correlation multiplier failed for {ticker}: {e}")
+            return 1.0
 
-        p = win rate, q = 1 - p, b = avg win / avg loss (payoff ratio).
+    # Bayesian prior for win-rate: beta(alpha, beta) with both = 20.
+    # Equivalent to 40 pseudo-trades at 50% win rate. This dominates the
+    # estimate at low N (where sample win rate is noisy) and fades as N grows.
+    _KELLY_PRIOR_ALPHA = 20.0
+    _KELLY_PRIOR_BETA = 20.0
+
+    def _kelly_fraction(
+        self, win_rate: float, payoff_ratio: float, n_trades: int = 0
+    ) -> float:
+        """Shrinkage-adjusted fractional Kelly: f* = (p - q) / b × safety_multiplier.
+
+        p = Bayesian-shrunk win rate, q = 1 - p, b = payoff ratio.
+
+        Kelly estimates are extremely sensitive to win-rate error at low N.
+        Overestimating win rate by 5% can double the ruin probability. We
+        address this two ways:
+
+        1. **Shrinkage toward a beta(20, 20) prior.** At N=20 sample has
+           equal weight with prior → shrunk estimate splits the difference.
+           At N=100 sample dominates. At N=5 prior dominates.
+        2. **Quarter-Kelly at low N, half-Kelly at high N.** Below 50 trades
+           the variance of the estimate is high enough that quarter-Kelly
+           is safer; above 50 we switch to the config default (half-Kelly).
+
+        PyQuantLab and the practitioner literature both recommend fractional
+        Kelly with some form of shrinkage until you have ~100+ observations.
         """
-        p = win_rate
-        q = 1 - p
-        b = payoff_ratio
-        if b <= 0:
+        if payoff_ratio <= 0:
             return self.config.RISK_PCT_PER_TRADE
 
-        kelly = (p - q) / b
-        # Apply safety multiplier (half-Kelly by default)
-        safe_kelly = kelly * self.config.KELLY_SAFETY_MULTIPLIER
-        # Clamp: never risk more than mode's max, never less than 0.5%
+        # 1. Bayesian shrinkage on win rate.
+        wins = win_rate * n_trades
+        losses = (1 - win_rate) * n_trades
+        a = wins + self._KELLY_PRIOR_ALPHA
+        b = losses + self._KELLY_PRIOR_BETA
+        p_shrunk = a / (a + b)
+        q_shrunk = 1 - p_shrunk
+
+        kelly = (p_shrunk - q_shrunk) / payoff_ratio
+
+        # 2. Adaptive safety multiplier: quarter-Kelly when sample is small.
+        if n_trades < 50:
+            safety = min(0.25, self.config.KELLY_SAFETY_MULTIPLIER)
+        else:
+            safety = self.config.KELLY_SAFETY_MULTIPLIER
+
+        safe_kelly = kelly * safety
+        # Clamp: never risk more than mode's max, never less than 0.5%.
         return max(0.005, min(safe_kelly, self.config.MAX_RISK_PER_TRADE))
 
     # ── Phase 1b: Volatility Adjustment ───────────────────────────
@@ -113,26 +184,86 @@ class RiskManager:
 
     # ── Phase 1c: Portfolio-Level Guards ───────────────────────────
 
+    def _fetch_alpaca_equity_history(self, days: int = 30) -> list[float]:
+        """Fetch daily equity values from Alpaca /v2/account/portfolio/history.
+
+        Returns a list of positive equity values filtered to the lookback window
+        and (if configured) the BASELINE_DATE. Returns empty list on failure.
+        """
+        try:
+            import requests as _rq
+            headers = {
+                "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
+                "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+            }
+            # Request ~days of daily bars. Alpaca accepts "1A","3M","1M","5D" — pick nearest.
+            period = "1M" if days <= 30 else ("3M" if days <= 90 else "1A")
+            resp = _rq.get(
+                f"{self.config.ALPACA_BASE_URL}/v2/account/portfolio/history",
+                headers=headers,
+                params={
+                    "period": period,
+                    "timeframe": "1D",
+                    "intraday_reporting": "market_hours",
+                },
+                timeout=10,
+            )
+            if not resp.ok:
+                return []
+            data = resp.json()
+            eq = data.get("equity") or []
+            ts = data.get("timestamp") or []
+            baseline = getattr(self.config, "BASELINE_DATE", None) or ""
+            baseline_ts = 0
+            if baseline:
+                try:
+                    baseline_ts = int(datetime.strptime(baseline, "%Y-%m-%d").timestamp())
+                except ValueError:
+                    baseline_ts = 0
+            prev = None
+            out = []
+            for i, e in enumerate(eq):
+                if not e or e <= 0:
+                    continue
+                if i < len(ts) and ts[i] < baseline_ts:
+                    continue
+                # Skip settlement artifacts: one-bar crash of >40% that recovers
+                # (mirrors the filter used in dashboard.py:390).
+                if prev is not None and e < prev * 0.6:
+                    continue
+                out.append(e)
+                prev = e
+            return out
+        except Exception as e:
+            logger.warning(f"Failed to fetch Alpaca equity history: {e}")
+            return []
+
     def check_drawdown_halt(self, account_value: float) -> bool:
         """Return True if drawdown from peak is within limits (OK to trade).
 
         Blocks new entries if drawdown > MAX_DRAWDOWN_HALT_PCT in last 30 days.
+
+        Uses Alpaca's portfolio_history endpoint for an authoritative equity
+        curve; falls back to permitting trading if history can't be fetched or
+        is too short to evaluate (less scary than blocking on transient errors).
         """
-        peak = self.db.get_peak_equity(days=30)
+        equity = self._fetch_alpaca_equity_history(days=30)
+        if len(equity) < 5:
+            return True  # Not enough history yet, allow trading.
+
+        peak = max(equity)
+        # Use Alpaca's authoritative current equity rather than caller-passed value
+        # (they should match, but if they don't, Alpaca wins).
+        current = equity[-1] if account_value <= 0 else account_value
         if peak <= 0:
-            return True  # No history yet, allow trading
-        # Current drawdown = how much we've lost from peak
-        # We approximate using today's realized P&L relative to peak
-        today_pnl = self.db.get_today_pnl()
-        cumulative = today_pnl["realized_pnl"]
-        drawdown_from_peak = peak - max(cumulative, 0)
-        if drawdown_from_peak <= 0:
             return True
-        drawdown_pct = drawdown_from_peak / account_value
+
+        drawdown_pct = max(0.0, (peak - current) / peak)
         if drawdown_pct > self.config.MAX_DRAWDOWN_HALT_PCT:
             logger.warning(
-                f"DRAWDOWN HALT: {drawdown_pct*100:.1f}% drawdown from peak "
-                f"exceeds {self.config.MAX_DRAWDOWN_HALT_PCT*100:.0f}% limit"
+                f"DRAWDOWN HALT: {drawdown_pct*100:.1f}% drawdown from 30-day peak "
+                f"${peak:,.0f} (current ${current:,.0f}) exceeds "
+                f"{self.config.MAX_DRAWDOWN_HALT_PCT*100:.0f}% limit"
             )
             return False
         return True
@@ -269,6 +400,60 @@ class RiskManager:
 
         logger.info(f"Sector check OK: {sector} exposure {exposure_pct*100:.1f}% (adding {ticker})")
         return True
+
+    # ── Phase 6d: CVaR Tail Risk Gate ──────────────────────────
+
+    def check_cvar_limit(
+        self,
+        candidate_ticker: str,
+        entry_value: float,
+        broker=None,
+        cvar_limit: float | None = None,
+    ) -> bool:
+        """Return True if adding this position keeps portfolio 5%-CVaR below
+        the limit. Requires a broker for historical bar fetch; when absent,
+        returns True (same fail-open philosophy as the correlation check).
+
+        Rationale: 25%-per-sector and correlation-aware sizing catch most
+        cluster risk, but neither captures the _joint_ tail behavior across
+        all holdings. CVaR does, using historical simulation so we don't
+        have to assume normality.
+        """
+        if broker is None:
+            return True
+        limit = cvar_limit if cvar_limit is not None else getattr(
+            self.config, "MAX_PORTFOLIO_CVAR_PCT", 0.05,
+        )
+        try:
+            from analytics.cvar import candidate_would_breach_cvar
+            holdings = {
+                t["ticker"]: (t.get("entry_price", 0) or 0) * (t.get("quantity", 0) or 0)
+                for t in self.db.get_open_trades()
+            }
+            breached, projected = candidate_would_breach_cvar(
+                broker=broker,
+                current_holdings=holdings,
+                candidate_ticker=candidate_ticker,
+                candidate_value=entry_value,
+                cvar_limit=limit,
+            )
+            if breached:
+                logger.warning(
+                    f"CVAR LIMIT: adding {candidate_ticker} "
+                    f"(${entry_value:,.0f}) would push portfolio 5%-CVaR to "
+                    f"{projected * 100:.2f}% > {limit * 100:.2f}% limit — blocking"
+                )
+                return False
+            if projected is not None:
+                logger.info(
+                    f"CVaR check OK: projected 5%-CVaR "
+                    f"{projected * 100:.2f}% ≤ {limit * 100:.2f}% "
+                    f"(adding {candidate_ticker})"
+                )
+            return True
+        except Exception as e:
+            logger.warning(f"CVaR check failed for {candidate_ticker}: {e}")
+            return True
 
     # ── Phase 6c: Overnight Gap Risk ───────────────────────────
 

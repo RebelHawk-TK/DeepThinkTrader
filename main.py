@@ -22,26 +22,10 @@ from utils.market_clock import get_market_clock
 from utils.notifications import notify_strategy_paused, notify_strategy_resumed, notify_system_event
 from utils.state import StateManager
 
-# Configure logging with rotation (10MB max, 5 backups)
+# Configure logging — set LOG_FORMAT=json for structured output, LOG_LEVEL=DEBUG for verbose.
 _log_file = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
-_file_handler = logging.handlers.RotatingFileHandler(
-    _log_file, maxBytes=10 * 1024 * 1024, backupCount=5,
-)
-_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-# Set restrictive permissions on log file
-try:
-    os.chmod(_log_file, 0o600)
-except OSError:
-    pass
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        _file_handler,
-    ],
-)
+from utils.logging_config import configure_logging  # noqa: E402
+configure_logging(log_file=_log_file)
 logger = logging.getLogger("DeepThinkTrader")
 
 
@@ -56,8 +40,36 @@ class DeepThinkTrader:
         self.execution = ExecutionAgent(self.db)
         self.scanner = ScannerAgent(self.db)
         self.clock = get_market_clock()
+        # Startup reconcile: close any DB-OPEN trades missing from Alpaca.
+        # Ghosts typically appear when the bot crashes mid-close. Run once here
+        # instead of on every exit check (that flooded logs on lock contention).
+        self.execution.reconcile_open_trades()
         self._last_scan_date: str = self.state.last_scan_date
         self._paused_portfolios: set[str] = self.state.paused_portfolios
+        self._current_regime = None  # populated by _assess_regime on each cycle
+
+    def _assess_regime(self) -> None:
+        """Classify market regime and log it. Visible, not enforced — operator
+        acts on the recommendation; the bot doesn't silently rewrite its config.
+        """
+        try:
+            from analytics.regime import classify_regime
+            from brokers.alpaca import AlpacaBroker
+            broker = AlpacaBroker(self.config)
+            self._current_regime = classify_regime(broker)
+            current = self.config.TRADE_MODE
+            mismatch = (
+                self._current_regime.recommended_mode != current
+                and self._current_regime.label != "unknown"
+            )
+            tag = "⚠️ " if mismatch else ""
+            logger.info(
+                f"{tag}Regime: {self._current_regime.describe()} "
+                f"(current mode: {current})"
+            )
+        except Exception as e:
+            logger.warning(f"Regime assessment failed: {e}")
+            self._current_regime = None
 
     def _run_scan(self) -> list[str]:
         """Run full-universe scan every cycle. Fast (~60s) thanks to batch API calls."""
@@ -97,6 +109,10 @@ class DeepThinkTrader:
     def run_cycle(self, tickers: list[str] | None = None, portfolio: str = "main") -> list[dict]:
         """Run one full research → analysis → execution cycle for all watchlist tickers."""
         label = portfolio.upper()
+        # Check regime at cycle start. Cheap (~1 API call) and a good
+        # forcing function for "are conditions sane right now?"
+        if portfolio == "main":
+            self._assess_regime()
 
         # Block new trades if portfolio is paused due to strategy degradation
         if portfolio in self._paused_portfolios:
@@ -122,10 +138,14 @@ class DeepThinkTrader:
             # Use dynamic sector watchlist if available, fall back to static
             watchlist = getattr(self, "_dynamic_watchlist", None) or self.config.WATCHLIST
 
-            # Merge watchlist + discovered (no duplicates)
-            base_tickers = list(tickers or watchlist)
-            if discovered:
-                for t in discovered:
+            # Scanner-first merge: composite-score-ranked discoveries lead, then
+            # watchlist fills remaining slots. This routes top conviction plays
+            # to the "high" news budget. Explicit `tickers` override bypasses both.
+            if tickers:
+                base_tickers = list(tickers)
+            else:
+                base_tickers = list(discovered) if discovered else []
+                for t in watchlist:
                     if t not in base_tickers:
                         base_tickers.append(t)
 
@@ -148,11 +168,19 @@ class DeepThinkTrader:
             for ex in exits:
                 logger.info(f"Position closed: {ex['ticker']} — {ex['reason']} | P&L: ${ex['pnl']:.2f}")
 
-        for ticker in tickers:
+        for idx, ticker in enumerate(tickers):
             try:
-                # Step 1: Research
-                logger.info(f"\n--- [{label}] Researching {ticker} ---")
-                report = self.research.generate_report(ticker)
+                # Step 1: Research — priority by list position (top 5 burn full budget,
+                # next 20 rotate 3 sources, tail uses cheapest source only).
+                if idx < 5:
+                    news_priority = "high"
+                elif idx < 25:
+                    news_priority = "medium"
+                else:
+                    news_priority = "low"
+
+                logger.info(f"\n--- [{label}] Researching {ticker} (news={news_priority}) ---")
+                report = self.research.generate_report(ticker, news_priority=news_priority)
 
                 # Step 2: Deep analysis
                 logger.info(f"--- [{label}] Analyzing {ticker} ---")
@@ -329,14 +357,33 @@ class DeepThinkTrader:
         # Phase 2a: Schedule fast exit checks every 5 minutes
         schedule.every(exit_interval).minutes.do(self._check_exits_only)
 
+        # Watchdog: force-exit if main loop stalls (20-hour silent hang on 2026-04-15
+        # proved we need this — process was alive but schedule.run_pending never returned).
+        import threading
+        self._last_tick = time.time()
+        _WATCHDOG_TIMEOUT_SEC = 1800  # 30 min — full cycle with 20+ tickers + debate can take 15-20min legitimately
+        def _watchdog():
+            while True:
+                time.sleep(60)
+                stalled = time.time() - self._last_tick
+                if stalled > _WATCHDOG_TIMEOUT_SEC:
+                    logger.error(
+                        f"WATCHDOG: main loop has not ticked for {stalled:.0f}s "
+                        f"(limit {_WATCHDOG_TIMEOUT_SEC}s) — forcing exit for launchd respawn"
+                    )
+                    os._exit(1)
+        threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
+        logger.info(f"Watchdog started (kill threshold: {_WATCHDOG_TIMEOUT_SEC}s stalled)")
+
         _heartbeat_counter = 0
         while True:
+            self._last_tick = time.time()
             schedule.run_pending()
 
-            # Heartbeat: log every ~60s so freezes are detectable
+            # Heartbeat: log every ~2min at INFO so freezes are visible in the log
             _heartbeat_counter += 1
-            if _heartbeat_counter % 2 == 0:  # Every ~60s (2 × 30s sleep)
-                logger.debug(f"Heartbeat: alive, {len(schedule.jobs)} jobs scheduled")
+            if _heartbeat_counter % 4 == 0:  # Every ~2min (4 × 30s sleep)
+                logger.info(f"Heartbeat: alive, {len(schedule.jobs)} jobs scheduled")
 
             # Sync to market open: run cycle right at 9:30 ET
             mins_to_open = self.clock.minutes_until_open()

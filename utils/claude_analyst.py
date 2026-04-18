@@ -47,14 +47,23 @@ class ClaudeAnalyst:
         return self._enabled and self._client is not None
 
     def _call(self, system: str, prompt: str, max_tokens: int = 1024) -> str | None:
-        """Make a Claude API call. Returns raw text response or None on error."""
+        """Make a Claude API call. Returns raw text response or None on error.
+
+        The system prompt is marked with ephemeral cache_control. Anthropic
+        silently ignores it when the block is below the model's minimum
+        cache size, so this is safe for short prompts too.
+        """
         if not self.enabled:
             return None
         try:
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=max_tokens,
-                system=system,
+                system=[{
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }],
                 messages=[{"role": "user", "content": prompt}],
             )
             return response.content[0].text

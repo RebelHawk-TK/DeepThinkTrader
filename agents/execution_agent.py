@@ -43,7 +43,38 @@ class ExecutionAgent:
             "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
             "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
         })
+        # Inject default timeout on every request. requests' default is None
+        # (blocks forever), which froze the main loop on 2026-04-15 when an
+        # Alpaca orders query stalled during reconcile.
+        _original_request = self._session.request
+        def _request_with_timeout(method, url, **kwargs):
+            kwargs.setdefault("timeout", (5, 30))  # (connect, read)
+            return _original_request(method, url, **kwargs)
+        self._session.request = _request_with_timeout
         self._base_url = self.config.ALPACA_BASE_URL
+        # Per-ticker throttle for ghost-trade reconciliation during exit checks.
+        # Reconcile each ghost at most once per 5 min to avoid log floods while
+        # still catching externally-closed positions without a bot restart.
+        self._ghost_reconcile_attempts: dict[str, float] = {}
+        self._ghost_reconcile_interval_sec = 300
+        # Reflection writer — lazy, optional. Failures never block exits.
+        self._reflection_writer = None
+
+    def _record_reflection(self, trade: dict, pnl: float, reason: str) -> None:
+        """Fire-and-forget post-trade lesson capture. Best-effort."""
+        try:
+            if self._reflection_writer is None:
+                from agents.reflection_writer import ReflectionWriter
+                self._reflection_writer = ReflectionWriter(db=self.db, config=self.config)
+            self._reflection_writer.on_trade_closed(
+                trade_id=trade["id"],
+                ticker=trade["ticker"],
+                thesis=(trade.get("reasoning") or "")[:800],
+                outcome_pnl=pnl,
+                outcome_context=reason,
+            )
+        except Exception as e:
+            logger.warning(f"Reflection capture failed for {trade.get('ticker')}: {e}")
 
     def _capture_request_id(
         self,
@@ -863,6 +894,35 @@ class ExecutionAgent:
 
         return result
 
+    def reconcile_open_trades(self) -> int:
+        """One-shot startup reconcile: close any DB-OPEN trades missing from Alpaca.
+
+        Previously this ran on every exit check, which flooded logs when a single
+        ticker had stale data. Running once at startup is sufficient — new ghosts
+        only appear if the bot crashes mid-close, which itself triggers a restart.
+
+        Returns: number of trades reconciled.
+        """
+        try:
+            open_trades = self.db.get_open_trades()
+            positions = {p["ticker"] for p in self.get_positions()}
+            ghosts = [t for t in open_trades if t["ticker"] not in positions]
+            if not ghosts:
+                logger.info(f"Startup reconcile: {len(open_trades)} OPEN trades match Alpaca — no ghosts")
+                return 0
+            logger.warning(
+                f"Startup reconcile: {len(ghosts)} ghost trade(s) found "
+                f"({', '.join(t['ticker'] for t in ghosts)}) — closing now"
+            )
+            exits: list[dict] = []
+            for trade in ghosts:
+                self._reconcile_missing_position(trade, exits)
+            logger.info(f"Startup reconcile: closed {len(exits)} ghost trades")
+            return len(exits)
+        except Exception as e:
+            logger.error(f"Startup reconcile failed: {e}")
+            return 0
+
     def _reconcile_missing_position(self, trade: dict, exits: list[dict]) -> None:
         """Reconcile a DB trade marked OPEN whose position no longer exists in Alpaca.
 
@@ -927,7 +987,13 @@ class ExecutionAgent:
                 )
                 try:
                     import yfinance as yf
-                    last_price = float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+                    from utils.yahoo_fundamentals import _yf_with_timeout
+                    hist = _yf_with_timeout(
+                        lambda: yf.Ticker(ticker).history(period="1d"),
+                        timeout=10,
+                        default=None,
+                    )
+                    last_price = float(hist["Close"].iloc[-1]) if hist is not None and not hist.empty else entry
                 except Exception:
                     last_price = entry  # worst case: 0 P&L
 
@@ -957,8 +1023,14 @@ class ExecutionAgent:
             try:
                 # Simplified retry: just close the trade at last known price
                 import yfinance as yf
+                from utils.yahoo_fundamentals import _yf_with_timeout
                 try:
-                    last_price = float(yf.Ticker(ticker).history(period="1d")["Close"].iloc[-1])
+                    hist = _yf_with_timeout(
+                        lambda: yf.Ticker(ticker).history(period="1d"),
+                        timeout=10,
+                        default=None,
+                    )
+                    last_price = float(hist["Close"].iloc[-1]) if hist is not None and not hist.empty else entry
                 except Exception:
                     last_price = entry
                 pnl = round((last_price - entry) * qty, 2) if is_long else round((entry - last_price) * qty, 2)
@@ -974,11 +1046,26 @@ class ExecutionAgent:
         open_trades = self.db.get_open_trades()
         positions = {p["ticker"]: p for p in self.get_positions()}
 
+        import time as _time
         for trade in open_trades:
             ticker = trade["ticker"]
             if ticker not in positions:
-                # Position gone from Alpaca but still OPEN in DB — reconcile
-                self._reconcile_missing_position(trade, exits)
+                # Position gone from Alpaca but still OPEN in DB. Reconcile now,
+                # but at most once per 5 min per ticker — prevents the log flood
+                # that prompted removing this path originally while still closing
+                # ghosts within one exit cycle of a manual/external close.
+                now = _time.monotonic()
+                last = self._ghost_reconcile_attempts.get(ticker, 0.0)
+                if now - last >= self._ghost_reconcile_interval_sec:
+                    self._ghost_reconcile_attempts[ticker] = now
+                    logger.warning(
+                        f"Exit check: {ticker} OPEN in DB but missing from Alpaca "
+                        "— reconciling now"
+                    )
+                    try:
+                        self._reconcile_missing_position(trade, exits)
+                    except Exception as e:
+                        logger.error(f"Ghost reconcile for {ticker} failed: {e}")
                 continue
 
             pos = positions[ticker]
@@ -1222,6 +1309,7 @@ class ExecutionAgent:
                     logger.info(
                         f"EXIT — {ticker}: {reason} | P&L: ${pnl:.2f} | X-Request-ID: {req_id}"
                     )
+                    self._record_reflection(trade, pnl, reason)
                 except Exception as e:
                     logger.error(f"Failed to close {ticker}: {e}")
 

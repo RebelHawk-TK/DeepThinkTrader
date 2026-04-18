@@ -147,13 +147,21 @@ class ResearchAgent:
                             "url": f"https://reddit.com{post.permalink}",
                         })
 
-                        # Also check top comments
-                        post.comments.replace_more(limit=0)
-                        for comment in post.comments[:5]:
-                            body = comment.body[:500]
-                            if ticker_lower in body.lower():
-                                c_sentiment = self.vader.polarity_scores(body)
-                                overall_scores.append(c_sentiment["compound"])
+                        # Also check top comments — skip viral posts where loading
+                        # the comment tree can stall PRAW for 30s+ (e.g. WSB DDs).
+                        if post.num_comments <= 200:
+                            try:
+                                post.comments.replace_more(limit=0)
+                                for comment in post.comments[:5]:
+                                    body = comment.body[:500]
+                                    if ticker_lower in body.lower():
+                                        c_sentiment = self.vader.polarity_scores(body)
+                                        overall_scores.append(c_sentiment["compound"])
+                            except Exception as ce:
+                                logger.warning(
+                                    f"Skipping comments for r/{sub_name} post "
+                                    f"'{post.title[:40]}...': {ce}"
+                                )
             except Exception as e:
                 logger.error(f"Reddit error for r/{sub_name}: {e}")
 
@@ -291,34 +299,48 @@ class ResearchAgent:
             logger.warning(f"Market regime fetch failed: {e}")
             return {}
 
-    def generate_report(self, ticker: str) -> dict:
-        """Generate a full research report combining all sources."""
-        # Research cache: reuse recent report if price hasn't moved >2%
+    # Cache: 4h base TTL, but price movement >2% invalidates. 15min was too
+    # tight for free-tier NewsAPI — burned the 100/day quota in ~5 cycles.
+    # 4h + price-move guard still catches breaking news while letting the
+    # same ticker avoid re-burning the quota all afternoon.
+    _REPORT_CACHE_TTL_SECONDS = 4 * 3600
+    # If the 5-source aggregator returned at least this many articles, we
+    # have enough news coverage and skip the free-tier NewsAPI call.
+    _NEWSAPI_COVERAGE_THRESHOLD = 3
+
+    def generate_report(self, ticker: str, news_priority: str = "medium") -> dict:
+        """Generate a full research report combining all sources.
+
+        news_priority: "high"/"medium"/"low" — routes aggregator to more/fewer sources
+        to respect API budgets. Top-conviction tickers should get "high".
+        """
         cached = self._report_cache.get(ticker)
         if cached:
             age_secs = (datetime.now() - cached["time"]).total_seconds()
-            if age_secs < 900:  # 15 minutes
+            if age_secs < self._REPORT_CACHE_TTL_SECONDS:
                 try:
                     import yfinance as _yf
                     snap_price = _yf.Ticker(ticker).fast_info.get("lastPrice", 0)
                     if snap_price and cached["price"] > 0:
                         price_change = abs(snap_price - cached["price"]) / cached["price"]
                         if price_change < 0.02:
-                            logger.info(f"Cache hit for {ticker} (age={age_secs:.0f}s, move={price_change:.1%})")
+                            logger.info(
+                                f"Cache hit for {ticker} "
+                                f"(age={age_secs / 60:.0f}min, move={price_change:.1%})"
+                            )
                             return cached["report"]
                 except Exception:
                     pass
 
         logger.info(f"Generating research report for {ticker}...")
 
-        news = self.fetch_news(ticker)
-
-        # Fetch from additional news sources (5 APIs via aggregator)
+        # Aggregator first — 5 free news sources. Only fall back to NewsAPI
+        # (100/day quota) when aggregator coverage is thin.
         aggregated_articles = []
         agg_sentiment = 0.0
         if self.news_aggregator:
             try:
-                aggregated_articles = self.news_aggregator.fetch_news(ticker, priority="medium")
+                aggregated_articles = self.news_aggregator.fetch_news(ticker, priority=news_priority)
                 agg_sentiment = self.news_aggregator.compute_sentiment(aggregated_articles)
                 logger.info(
                     f"Aggregated news for {ticker}: {len(aggregated_articles)} articles, "
@@ -326,6 +348,15 @@ class ResearchAgent:
                 )
             except Exception as e:
                 logger.error(f"NewsAggregator error for {ticker}: {e}")
+
+        if len(aggregated_articles) >= self._NEWSAPI_COVERAGE_THRESHOLD:
+            news = []
+            logger.info(
+                f"NewsAPI skipped for {ticker} "
+                f"({len(aggregated_articles)} articles already from aggregator — saving quota)"
+            )
+        else:
+            news = self.fetch_news(ticker)
 
         reddit = self.fetch_reddit_sentiment(ticker)
         technicals = self.fetch_technicals(ticker)

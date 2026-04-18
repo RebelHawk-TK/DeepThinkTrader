@@ -213,6 +213,9 @@ Output this exact JSON structure:
 
 
 class AIDeepThinkAgent:
+    # How many past-trade lessons to retrieve and inject per analysis.
+    REFLECTION_RETRIEVAL_LIMIT = 5
+
     def __init__(self, db: Database | None = None):
         self.config = Config()
         self.db = db or Database()
@@ -220,6 +223,20 @@ class AIDeepThinkAgent:
         # Import fallback
         from agents.deepthink_agent import DeepThinkAgent
         self.fallback = DeepThinkAgent(self.db)
+
+    def _build_reflection_context(self, ticker: str) -> str:
+        """Retrieve recent lessons and format them for the prompt.
+
+        Returns an empty string when no reflections exist, so the prompt
+        degrades gracefully during the first weeks of use.
+        """
+        try:
+            from agents.reflection_writer import format_reflections_for_prompt
+            rows = self.db.get_reflections(ticker=ticker, limit=self.REFLECTION_RETRIEVAL_LIMIT)
+            return format_reflections_for_prompt(rows)
+        except Exception as e:
+            logger.warning(f"Reflection retrieval failed for {ticker}: {e}")
+            return ""
 
     def _build_report_prompt(self, report: dict) -> str:
         """Convert research report to a concise prompt for Claude."""
@@ -388,11 +405,25 @@ class AIDeepThinkAgent:
 
         try:
             prompt = self._build_report_prompt(report)
+            # Prepend past-trade lessons for this ticker (retrieval-augmented
+            # prompting per TradingAgents + FinMem). Lives OUTSIDE the cached
+            # system block because it changes per ticker; keep the system
+            # block cache-stable.
+            reflections_block = self._build_reflection_context(ticker)
+            if reflections_block:
+                prompt = f"{reflections_block}\n\n{prompt}"
 
+            # Cache the large system prompt (~2.5k tokens) — cuts warm-path
+            # cost by ~90% on Haiku. Anthropic silently ignores cache_control
+            # if the block is below the model's minimum cache size.
             response = self.client.messages.create(
                 model="claude-haiku-4-5",
                 max_tokens=4096,
-                system=SYSTEM_PROMPT,
+                system=[{
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
                 messages=[{"role": "user", "content": prompt}],
             )
 

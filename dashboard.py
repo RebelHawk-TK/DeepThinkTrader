@@ -16,6 +16,31 @@ import streamlit as st
 
 from config import Config
 from utils.database import Database
+from utils.streamlit_auth import require_auth
+
+# Phase B cloud gate — no-op on Mac dev (DASHBOARD_AUTH_REQUIRED not set).
+# Must run before any data-sensitive rendering.
+require_auth()
+
+from utils.dashboard_data import (
+    compute_30day_pnl,
+    compute_alerts,
+    compute_bot_status,
+    compute_drawdown_from_peak,
+    compute_kelly_state,
+    compute_market_state,
+    compute_portfolio_cvar,
+    compute_recent_reflections,
+    compute_regime,
+    compute_today_pnl,
+    compute_top_correlation,
+    compute_total_exposure_pct,
+)
+from utils.dashboard_widgets import (
+    render_kpi_row,
+    render_risk_memory,
+    render_status_banner,
+)
 
 st.set_page_config(page_title="DeepThinkTrader", page_icon="📈", layout="wide")
 
@@ -507,33 +532,71 @@ _selected_mode = st.sidebar.radio(
 )
 
 if _selected_mode != _current_mode:
-    if st.sidebar.button(f"Switch to {_mode_labels[_selected_mode]}", type="primary"):
-        import subprocess, re as _re
+    # Two-step confirm — a misclick here kills the bot with positions open.
+    _pending_key = "pending_mode_switch"
+    _pending = st.session_state.get(_pending_key)
 
-        _env_path = os.path.join(os.path.dirname(__file__), ".env")
-        _env_content = open(_env_path).read()
-        _env_content = _re.sub(
-            r"^TRADE_MODE=.*$",
-            f"TRADE_MODE={_selected_mode}",
-            _env_content,
-            flags=_re.MULTILINE,
+    # Check if market is open with open positions — block switch entirely.
+    _open_count = 0
+    try:
+        _open_count = len(db.get_open_trades())
+    except Exception:
+        pass
+    _market_open = False
+    try:
+        from utils.market_clock import get_market_clock
+        _market_open = get_market_clock().is_market_open()
+    except Exception:
+        pass
+    _blocked = _market_open and _open_count > 0
+
+    if _blocked:
+        st.sidebar.error(
+            f"🚫 Can't switch modes during market hours with {_open_count} open "
+            f"position(s). Close positions or wait for market close."
         )
-        with open(_env_path, "w") as f:
-            f.write(_env_content)
-
-        # Restart bot
-        _project_dir = os.path.dirname(__file__)
-        subprocess.Popen(
-            ["bash", "-c", f"cd {_project_dir} && bash stop.sh && bash run.sh"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+    elif _pending != _selected_mode:
+        if st.sidebar.button(
+            f"Switch to {_mode_labels[_selected_mode]}", type="primary", key="mode_switch_1"
+        ):
+            st.session_state[_pending_key] = _selected_mode
+            st.rerun()
+    else:
+        st.sidebar.warning(
+            f"⚠️ Confirm: switching to **{_mode_labels[_selected_mode]}** will "
+            f"**restart the bot**. Any running analysis will be interrupted."
         )
+        _c1, _c2 = st.sidebar.columns(2)
+        if _c1.button("✅ Confirm", type="primary", key="mode_switch_confirm"):
+            import subprocess, re as _re
 
-        st.sidebar.success(f"Switching to {_mode_labels[_selected_mode]}... restarting bot")
-        import time as _t
-        _t.sleep(3)
-        st.cache_data.clear()
-        st.rerun()
+            _env_path = os.path.join(os.path.dirname(__file__), ".env")
+            _env_content = open(_env_path).read()
+            _env_content = _re.sub(
+                r"^TRADE_MODE=.*$",
+                f"TRADE_MODE={_selected_mode}",
+                _env_content,
+                flags=_re.MULTILINE,
+            )
+            with open(_env_path, "w") as f:
+                f.write(_env_content)
+
+            _project_dir = os.path.dirname(__file__)
+            subprocess.Popen(
+                ["bash", "-c", f"cd {_project_dir} && bash stop.sh && bash run.sh"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+            st.session_state.pop(_pending_key, None)
+            st.sidebar.success(f"Switching to {_mode_labels[_selected_mode]}... restarting bot")
+            import time as _t
+            _t.sleep(3)
+            st.cache_data.clear()
+            st.rerun()
+        if _c2.button("Cancel", key="mode_switch_cancel"):
+            st.session_state.pop(_pending_key, None)
+            st.rerun()
 else:
     _mode_desc = {
         "safe": "Low risk, high conviction only",
@@ -564,14 +627,29 @@ log_path = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
 bot_pid_path = os.path.join(os.path.dirname(__file__), ".trader.pid")
 dash_pid_path = os.path.join(os.path.dirname(__file__), ".dashboard.pid")
 
-# Bot running check
+# Bot running check — consult run.sh's PID file first, then launchctl.
+# Matches status.sh's two-source strategy so the sidebar doesn't lie after
+# launchd takes over.
 bot_running = False
+pid = None
 if os.path.exists(bot_pid_path):
     try:
         pid = int(open(bot_pid_path).read().strip())
-        os.kill(pid, 0)  # Check if process exists
+        os.kill(pid, 0)
         bot_running = True
     except (ProcessLookupError, ValueError, OSError):
+        pid = None
+if not bot_running:
+    try:
+        import subprocess as _sp
+        out = _sp.check_output(["launchctl", "list"], text=True, timeout=2)
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == "com.deepthinktrader.bot" and parts[0] != "-":
+                pid = int(parts[0])
+                bot_running = True
+                break
+    except Exception:
         pass
 
 if bot_running:
@@ -770,144 +848,198 @@ if portfolio_hist and portfolio_hist.get("equity"):
             sortino_ratio = round((mean_ret / downside_std) * np.sqrt(252), 2)
 
 # ──────────────────────────────────────────────
-# TOP METRICS — Portfolio & Risk in Cards
+# STATUS BANNER + PRIMARY KPI ROW (Sprint 6 clean-top redesign)
 # ──────────────────────────────────────────────
 
-st.markdown('<div class="section-header">Account Overview</div>', unsafe_allow_html=True)
+# --- Status banner: bot health | market | regime | alerts -----------
+_log_path = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
+_bot_status, _bot_detail = compute_bot_status(_log_path)
+try:
+    from utils.market_clock import get_market_clock as _get_clock
+    _market_label, _market_open = compute_market_state(_get_clock())
+except Exception:
+    _market_label, _market_open = "CLOSED", False
+_regime = compute_regime(config)
+# True today-only P&L from Alpaca (resets at midnight ET). Falls back to 0
+# if the account response is missing last_equity for any reason.
+_today_pnl, _today_pnl_pct = compute_today_pnl(account)
+_drawdown_pct = compute_drawdown_from_peak(portfolio_hist) if portfolio_hist else max_drawdown_pct
+_halt_pct = float(getattr(config, "MAX_DRAWDOWN_HALT_PCT", 0.08)) * 100
+# Revenge-streak calc — count trailing consecutive losses.
+_streak = 0
+for _t in reversed(closed_trades):
+    if (_t.get("pnl") or 0) < 0:
+        _streak += 1
+    else:
+        break
+_banner_alerts = compute_alerts(
+    paused_portfolios=set(getattr(state, "paused_portfolios", []) if "state" in globals() else []),
+    drawdown_pct=_drawdown_pct,
+    drawdown_halt_pct=_halt_pct,
+    consecutive_losses=_streak,
+    circuit_breaker_active=False,  # Risk_Dashboard page owns the live check
+)
+render_status_banner(
+    bot_status=_bot_status, bot_detail=_bot_detail,
+    market_state=_market_label, market_is_open=_market_open,
+    regime_label=_regime["label"], regime_vol_pct=_regime["vol_pct"],
+    recommended_mode=_regime["recommended_mode"],
+    current_mode=config.TRADE_MODE,
+    alerts=_banner_alerts,
+)
 
-_pnl_card = "kpi-card-green" if total_pnl >= 0 else "kpi-card-red"
-_dd_card = "kpi-card-amber" if max_drawdown_pct > 5 else "kpi-card"
+# --- Primary KPI row: 5 numbers ------------------------------------
+# Pass live equity so the 30-day value updates intraday instead of freezing
+# at yesterday's daily-bar close.
+_thirty_day_pnl, _thirty_day_pct = compute_30day_pnl(portfolio_hist, current_equity=equity)
+_exposure_pct = compute_total_exposure_pct(positions, equity)
+render_kpi_row(
+    equity=equity,
+    today_pnl=_today_pnl, today_pnl_pct=_today_pnl_pct,
+    thirty_day_pnl=_thirty_day_pnl, thirty_day_pnl_pct=_thirty_day_pct,
+    open_positions_count=len(open_trades_db),
+    total_exposure_pct=_exposure_pct,
+    drawdown_from_peak_pct=_drawdown_pct,
+    drawdown_halt_pct=_halt_pct,
+)
 
-_card_left, _card_mid, _card_right = st.columns(3)
+# --- Full metrics (collapsed by default) ---------------------------
+with st.expander("Full metrics (Sharpe, Sortino, rolling windows, edge quality)", expanded=False):
+    st.markdown('<div class="section-header">Account Overview</div>', unsafe_allow_html=True)
 
-with _card_left:
-    st.markdown(f'<div class="{_pnl_card}">', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-    with c1:
-        st.metric(
-            "Portfolio Value",
-            f"${equity:,.2f}",
-            delta=f"${total_pnl:+,.2f}",
-            delta_color="normal" if total_pnl >= 0 else "inverse",
-        )
-    with c2:
-        st.metric("Cash", f"${cash:,.2f}")
-    c3, c4 = st.columns(2)
-    with c3:
-        st.metric("Realized P&L", f"${realized_pnl:+,.2f}",
-                  delta_color="normal" if realized_pnl >= 0 else "inverse")
-    with c4:
-        st.metric("Unrealized P&L", f"${unrealized_pnl:+,.2f}",
-                  delta_color="normal" if unrealized_pnl >= 0 else "inverse")
-    st.markdown('</div>', unsafe_allow_html=True)
+    _pnl_card = "kpi-card-green" if total_pnl >= 0 else "kpi-card-red"
+    _dd_card = "kpi-card-amber" if max_drawdown_pct > 5 else "kpi-card"
 
-with _card_mid:
-    _wr_card = "kpi-card-green" if win_rate >= 55 else ("kpi-card-red" if win_rate < 45 and closed_trades else "kpi-card")
-    st.markdown(f'<div class="{_wr_card}">', unsafe_allow_html=True)
-    p1, p2 = st.columns(2)
-    with p1:
-        st.metric("Win Rate", f"{win_rate:.0f}%" if closed_trades else "N/A")
-    with p2:
-        st.metric("Total Trades", total_trades)
-    p3, p4 = st.columns(2)
-    with p3:
-        st.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor > 0 else "N/A")
-    with p4:
-        _expectancy = (avg_win * (win_rate/100) - avg_loss * (1-win_rate/100)) if closed_trades else 0
-        st.metric("Expectancy", f"${_expectancy:+,.2f}" if closed_trades else "N/A")
-    st.markdown('</div>', unsafe_allow_html=True)
+    _card_left, _card_mid, _card_right = st.columns(3)
 
-with _card_right:
-    st.markdown(f'<div class="{_dd_card}">', unsafe_allow_html=True)
-    r1, r2 = st.columns(2)
-    with r1:
-        st.metric("Max Drawdown", f"-{max_drawdown_pct:.1f}%",
-                  delta=f"-${max_drawdown_dollars:,.0f}" if max_drawdown_dollars > 0 else "$0",
-                  delta_color="normal" if max_drawdown_dollars > 0 else "off")
-    with r2:
-        st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
-    r3, r4 = st.columns(2)
-    with r3:
-        st.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
-    with r4:
-        st.metric("Open Positions", len(open_trades_db))
-    st.markdown('</div>', unsafe_allow_html=True)
+    with _card_left:
+        st.markdown(f'<div class="{_pnl_card}">', unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric(
+                "Portfolio Value",
+                f"${equity:,.2f}",
+                delta=f"${total_pnl:+,.2f}",
+                delta_color="normal" if total_pnl >= 0 else "inverse",
+            )
+        with c2:
+            st.metric("Cash", f"${cash:,.2f}")
+        c3, c4 = st.columns(2)
+        with c3:
+            st.metric("Realized P&L", f"${realized_pnl:+,.2f}",
+                      delta_color="normal" if realized_pnl >= 0 else "inverse")
+        with c4:
+            st.metric("Unrealized P&L", f"${unrealized_pnl:+,.2f}",
+                      delta_color="normal" if unrealized_pnl >= 0 else "inverse")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# TOP METRICS ROW 3 — Rolling Performance (Tier 2 #10)
-if closed_trades:
-    def rolling_stats(trades, days):
-        cutoff = dt.now().isoformat()[:10]
-        try:
-            from datetime import timedelta
-            cutoff_dt = dt.now() - timedelta(days=days)
-            cutoff_str = cutoff_dt.isoformat()
-        except Exception:
-            return None, None
-        recent = [t for t in trades if (t.get("timestamp") or "") >= cutoff_str]
-        if not recent:
-            return 0, 0
-        wins = sum(1 for t in recent if (t.get("pnl") or 0) > 0)
-        wr = (wins / len(recent) * 100) if recent else 0
-        pnl = sum(t.get("pnl", 0) or 0 for t in recent)
-        return round(wr), round(pnl, 2)
+    with _card_mid:
+        _wr_card = "kpi-card-green" if win_rate >= 55 else ("kpi-card-red" if win_rate < 45 and closed_trades else "kpi-card")
+        st.markdown(f'<div class="{_wr_card}">', unsafe_allow_html=True)
+        p1, p2 = st.columns(2)
+        with p1:
+            st.metric("Win Rate", f"{win_rate:.0f}%" if closed_trades else "N/A")
+        with p2:
+            st.metric("Total Trades", total_trades)
+        p3, p4 = st.columns(2)
+        with p3:
+            st.metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor > 0 else "N/A")
+        with p4:
+            _expectancy = (avg_win * (win_rate/100) - avg_loss * (1-win_rate/100)) if closed_trades else 0
+            st.metric("Expectancy", f"${_expectancy:+,.2f}" if closed_trades else "N/A")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    wr7, pnl7 = rolling_stats(closed_trades, 7)
-    wr30, pnl30 = rolling_stats(closed_trades, 30)
-    wr90, pnl90 = rolling_stats(closed_trades, 90)
+    with _card_right:
+        st.markdown(f'<div class="{_dd_card}">', unsafe_allow_html=True)
+        r1, r2 = st.columns(2)
+        with r1:
+            st.metric("Max Drawdown", f"-{max_drawdown_pct:.1f}%",
+                      delta=f"-${max_drawdown_dollars:,.0f}" if max_drawdown_dollars > 0 else "$0",
+                      delta_color="normal" if max_drawdown_dollars > 0 else "off")
+        with r2:
+            st.metric("Sharpe Ratio", f"{sharpe_ratio:.2f}")
+        r3, r4 = st.columns(2)
+        with r3:
+            st.metric("Sortino Ratio", f"{sortino_ratio:.2f}")
+        with r4:
+            st.metric("Open Positions", len(open_trades_db))
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    pcol1, pcol2, pcol3, pcol4, pcol5, pcol6 = st.columns(6)
-    with pcol1:
-        st.metric("7d Win Rate", f"{wr7}%" if wr7 is not None else "N/A")
-    with pcol2:
-        st.metric("7d P&L", f"${pnl7:+,.2f}" if pnl7 is not None else "N/A")
-    with pcol3:
-        st.metric("30d Win Rate", f"{wr30}%" if wr30 is not None else "N/A")
-    with pcol4:
-        st.metric("30d P&L", f"${pnl30:+,.2f}" if pnl30 is not None else "N/A")
-    with pcol5:
-        st.metric("90d Win Rate", f"{wr90}%" if wr90 is not None else "N/A")
-    with pcol6:
-        st.metric("90d P&L", f"${pnl90:+,.2f}" if pnl90 is not None else "N/A")
+    # TOP METRICS ROW 3 — Rolling Performance (Tier 2 #10)
+    if closed_trades:
+        def rolling_stats(trades, days):
+            cutoff = dt.now().isoformat()[:10]
+            try:
+                from datetime import timedelta
+                cutoff_dt = dt.now() - timedelta(days=days)
+                cutoff_str = cutoff_dt.isoformat()
+            except Exception:
+                return None, None
+            recent = [t for t in trades if (t.get("timestamp") or "") >= cutoff_str]
+            if not recent:
+                return 0, 0
+            wins = sum(1 for t in recent if (t.get("pnl") or 0) > 0)
+            wr = (wins / len(recent) * 100) if recent else 0
+            pnl = sum(t.get("pnl", 0) or 0 for t in recent)
+            return round(wr), round(pnl, 2)
 
-# ── Edge Quality Metrics (v2.0) ───────────────
-# Compute from trades that have edges_fired column
-_trades_with_edges = [t for t in all_trades if t.get("edges_fired") is not None]
-if _trades_with_edges:
-    _avg_edges = np.mean([t["edges_fired"] for t in _trades_with_edges])
-    _edge_trades_passed = sum(1 for t in _trades_with_edges if t["edges_fired"] >= config.MIN_EDGES_REQUIRED)
-    _edge_hit_rate = (_edge_trades_passed / len(_trades_with_edges) * 100) if _trades_with_edges else 0
+        wr7, pnl7 = rolling_stats(closed_trades, 7)
+        wr30, pnl30 = rolling_stats(closed_trades, 30)
+        wr90, pnl90 = rolling_stats(closed_trades, 90)
 
-    ecol1, ecol2, ecol3 = st.columns(3)
-    with ecol1:
-        st.metric("Avg Edges/Trade", f"{_avg_edges:.1f}/3")
-    with ecol2:
-        st.metric("Edge Pass Rate", f"{_edge_hit_rate:.0f}%")
-    with ecol3:
-        # Breakdown by edge type from closed trades with edge_details
-        _edge_labels = {"Fundamental": 0, "Technical": 0, "Sentiment": 0}
-        _edge_totals = {"Fundamental": 0, "Technical": 0, "Sentiment": 0}
-        for t in _trades_with_edges:
-            details = t.get("edge_details")
-            if details:
-                try:
-                    edges = json.loads(details) if isinstance(details, str) else details
-                    for e in edges:
-                        lbl = e.get("label", "")
-                        if lbl in _edge_labels:
-                            _edge_totals[lbl] += 1
-                            if e.get("passed"):
-                                _edge_labels[lbl] += 1
-                except Exception:
-                    pass
-        edge_rates = []
-        for lbl in ["Fundamental", "Technical", "Sentiment"]:
-            total = _edge_totals[lbl]
-            passed = _edge_labels[lbl]
-            rate = f"{passed}/{total}" if total > 0 else "—"
-            edge_rates.append(f"{lbl[:4]}: {rate}")
-        st.metric("Edge Breakdown", " | ".join(edge_rates))
+        pcol1, pcol2, pcol3, pcol4, pcol5, pcol6 = st.columns(6)
+        with pcol1:
+            st.metric("7d Win Rate", f"{wr7}%" if wr7 is not None else "N/A")
+        with pcol2:
+            st.metric("7d P&L", f"${pnl7:+,.2f}" if pnl7 is not None else "N/A")
+        with pcol3:
+            st.metric("30d Win Rate", f"{wr30}%" if wr30 is not None else "N/A")
+        with pcol4:
+            st.metric("30d P&L", f"${pnl30:+,.2f}" if pnl30 is not None else "N/A")
+        with pcol5:
+            st.metric("90d Win Rate", f"{wr90}%" if wr90 is not None else "N/A")
+        with pcol6:
+            st.metric("90d P&L", f"${pnl90:+,.2f}" if pnl90 is not None else "N/A")
 
-st.markdown("")
+    # ── Edge Quality Metrics (v2.0) ───────────────
+    # Compute from trades that have edges_fired column
+    _trades_with_edges = [t for t in all_trades if t.get("edges_fired") is not None]
+    if _trades_with_edges:
+        _avg_edges = np.mean([t["edges_fired"] for t in _trades_with_edges])
+        _edge_trades_passed = sum(1 for t in _trades_with_edges if t["edges_fired"] >= config.MIN_EDGES_REQUIRED)
+        _edge_hit_rate = (_edge_trades_passed / len(_trades_with_edges) * 100) if _trades_with_edges else 0
+
+        ecol1, ecol2, ecol3 = st.columns(3)
+        with ecol1:
+            st.metric("Avg Edges/Trade", f"{_avg_edges:.1f}/3")
+        with ecol2:
+            st.metric("Edge Pass Rate", f"{_edge_hit_rate:.0f}%")
+        with ecol3:
+            # Breakdown by edge type from closed trades with edge_details
+            _edge_labels = {"Fundamental": 0, "Technical": 0, "Sentiment": 0}
+            _edge_totals = {"Fundamental": 0, "Technical": 0, "Sentiment": 0}
+            for t in _trades_with_edges:
+                details = t.get("edge_details")
+                if details:
+                    try:
+                        edges = json.loads(details) if isinstance(details, str) else details
+                        for e in edges:
+                            lbl = e.get("label", "")
+                            if lbl in _edge_labels:
+                                _edge_totals[lbl] += 1
+                                if e.get("passed"):
+                                    _edge_labels[lbl] += 1
+                    except Exception:
+                        pass
+            edge_rates = []
+            for lbl in ["Fundamental", "Technical", "Sentiment"]:
+                total = _edge_totals[lbl]
+                passed = _edge_labels[lbl]
+                rate = f"{passed}/{total}" if total > 0 else "—"
+                edge_rates.append(f"{lbl[:4]}: {rate}")
+            st.metric("Edge Breakdown", " | ".join(edge_rates))
+
+    st.markdown("")
 
 # ──────────────────────────────────────────────
 # PERFORMANCE vs BENCHMARKS
@@ -1313,6 +1445,34 @@ if portfolio_hist and portfolio_hist.get("equity"):
             st.plotly_chart(fig_dd, use_container_width=True)
 else:
     st.info("Portfolio history will populate after first trading day")
+
+st.divider()
+
+# ──────────────────────────────────────────────
+# RISK & MEMORY — Kelly / CVaR / correlation / reflections
+# ──────────────────────────────────────────────
+
+# Pull the risk_manager instance lazily so importing dashboard.py in tests
+# doesn't reach out to Alpaca.
+try:
+    from utils.risk_manager import RiskManager
+    _rm = RiskManager(db=db)
+    _kelly = compute_kelly_state(db, _rm, portfolio=_pf if _pf else "main")
+except Exception:
+    _kelly = {"fraction": None, "n_trades": 0, "win_rate": None}
+_cvar = compute_portfolio_cvar(positions, config)
+_top_corr = compute_top_correlation(positions, config)
+_reflections = compute_recent_reflections(db, limit=3)
+
+render_risk_memory(
+    kelly_fraction=_kelly["fraction"],
+    kelly_n_trades=_kelly["n_trades"],
+    kelly_win_rate=_kelly["win_rate"],
+    portfolio_cvar_pct=_cvar,
+    cvar_limit_pct=float(getattr(config, "MAX_PORTFOLIO_CVAR_PCT", 0.05)),
+    top_correlation=_top_corr,
+    recent_reflections=_reflections,
+)
 
 st.divider()
 

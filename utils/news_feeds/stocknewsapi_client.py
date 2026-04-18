@@ -24,7 +24,7 @@ SENTIMENT_MAP = {
 class StockNewsAPIClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self.limiter = RateLimiter.monthly(max_calls=100, name="StockNewsAPI")
+        self.limiter = RateLimiter.monthly(max_calls=20000, name="StockNewsAPI")
 
     def fetch_news(self, ticker: str, limit: int = 10) -> list[NewsArticle]:
         if not self.api_key:

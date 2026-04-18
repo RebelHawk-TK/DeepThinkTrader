@@ -16,18 +16,34 @@ echo -e "${CYAN}  DeepThinkTrader Status${NC}"
 echo -e "${CYAN}═══════════════════════════════════════${NC}"
 echo ""
 
-# Trading bot status
+# Trading bot status — check run.sh PID file first, then launchd as fallback.
+BOT_PID=""; BOT_MGR=""
 if [ -f "$DIR/.trader.pid" ] && kill -0 "$(cat "$DIR/.trader.pid")" 2>/dev/null; then
-    PID=$(cat "$DIR/.trader.pid")
-    echo -e "  Trading Bot:   ${GREEN}RUNNING${NC} (PID $PID)"
+    BOT_PID=$(cat "$DIR/.trader.pid"); BOT_MGR="run.sh"
+else
+    LD_PID=$(launchctl list 2>/dev/null | awk '$3=="com.deepthinktrader.bot" && $1!="-" {print $1}')
+    if [ -n "$LD_PID" ]; then
+        BOT_PID="$LD_PID"; BOT_MGR="launchd"
+    fi
+fi
+if [ -n "$BOT_PID" ]; then
+    echo -e "  Trading Bot:   ${GREEN}RUNNING${NC} (PID $BOT_PID, $BOT_MGR)"
 else
     echo -e "  Trading Bot:   ${RED}STOPPED${NC}"
 fi
 
-# Dashboard status
+# Dashboard status — same two-source check.
+DASH_PID=""; DASH_MGR=""
 if [ -f "$DIR/.dashboard.pid" ] && kill -0 "$(cat "$DIR/.dashboard.pid")" 2>/dev/null; then
-    PID=$(cat "$DIR/.dashboard.pid")
-    echo -e "  Dashboard:     ${GREEN}RUNNING${NC} (PID $PID) → http://localhost:8501"
+    DASH_PID=$(cat "$DIR/.dashboard.pid"); DASH_MGR="run.sh"
+else
+    LD_DASH=$(launchctl list 2>/dev/null | awk '$3=="com.deepthinktrader.dashboard" && $1!="-" {print $1}')
+    if [ -n "$LD_DASH" ]; then
+        DASH_PID="$LD_DASH"; DASH_MGR="launchd"
+    fi
+fi
+if [ -n "$DASH_PID" ]; then
+    echo -e "  Dashboard:     ${GREEN}RUNNING${NC} (PID $DASH_PID, $DASH_MGR) → http://localhost:8501"
 else
     echo -e "  Dashboard:     ${RED}STOPPED${NC}"
 fi

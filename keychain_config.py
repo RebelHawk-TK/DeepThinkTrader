@@ -20,10 +20,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Containers/Linux hosts skip Keychain entirely — they get secrets from env or GCP.
+_KEYCHAIN_DISABLED = os.getenv("DISABLE_KEYCHAIN") == "1"
 
 KEYCHAIN_SERVICE = "com.moderndesignconcept"
 KEYCHAIN_ACCOUNT = f"{KEYCHAIN_SERVICE}.deepthinktrader"
@@ -47,6 +51,8 @@ SECRET_KEYS = {
 
 def save_secrets(data: dict) -> None:
     """Store secrets dict in macOS Keychain."""
+    if _KEYCHAIN_DISABLED:
+        raise RuntimeError("Keychain disabled (DISABLE_KEYCHAIN=1) — cannot save secrets here")
     json_str = json.dumps(data)
 
     # Delete existing entry (ignore errors if not found)
@@ -74,7 +80,10 @@ def save_secrets(data: dict) -> None:
 
 
 def load_secrets() -> dict | None:
-    """Read secrets dict from macOS Keychain. Returns None if not found."""
+    """Read secrets dict from macOS Keychain. Returns None if not found or disabled."""
+    if _KEYCHAIN_DISABLED:
+        return None
+
     result = subprocess.run(
         ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", KEYCHAIN_ACCOUNT, "-w"],
         capture_output=True,

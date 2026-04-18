@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (repo-wide: syntax + undefined-name only)
+        # Pre-existing style issues exist; keep repo-wide lint narrow so CI
+        # signals real breakage. Tighten per-area by removing `--select` below.
+        run: |
+          ruff check --select=E9,F63,F7,F82 --exclude .venv --exclude __pycache__ .
+
+      - name: Lint (tests/: full ruleset)
+        run: ruff check tests/
+
+      - name: Run pytest
+        env:
+          # Stub secrets so config.validate() doesn't emit warnings the tests
+          # don't care about. Conftest.py also sets these per-test.
+          ALPACA_API_KEY: test
+          ALPACA_SECRET_KEY: test
+          ALPACA_BASE_URL: https://paper-api.alpaca.markets
+          ANTHROPIC_API_KEY: test
+          NEWSAPI_KEY: test
+          REDDIT_CLIENT_ID: test
+          REDDIT_CLIENT_SECRET: test
+          TRADE_MODE: normal
+        run: pytest -q

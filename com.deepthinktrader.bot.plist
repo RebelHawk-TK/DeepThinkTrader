@@ -6,8 +6,8 @@
     <string>com.deepthinktrader.bot</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
-        <string>/Users/rebelhawk/Documents/Claude/StockTrader/launchd_bot.sh</string>
+        <string>/Users/rebelhawk/Documents/Claude/StockTrader/.venv/bin/python3</string>
+        <string>main.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/rebelhawk/Documents/Claude/StockTrader</string>
@@ -18,8 +18,23 @@
     <key>ThrottleInterval</key>
     <integer>30</integer>
     <key>StandardOutPath</key>
-    <string>/Users/rebelhawk/Documents/Claude/StockTrader/deepthinktrader.log</string>
+    <string>/Users/rebelhawk/Documents/Claude/StockTrader/launchd_stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/rebelhawk/Documents/Claude/StockTrader/deepthinktrader.log</string>
+    <string>/Users/rebelhawk/Documents/Claude/StockTrader/launchd_stderr.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/rebelhawk/Documents/Claude/StockTrader/.venv/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
 </dict>
 </plist>

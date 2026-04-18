@@ -211,8 +211,8 @@ class Config:
     # Baseline date — dashboard ignores Alpaca portfolio history before this date
     BASELINE_DATE: str = os.getenv("BASELINE_DATE", "2026-03-24")
 
-    # Database
-    DB_PATH: str = os.path.join(os.path.dirname(__file__), "trades.db")
+    # Database — env override for containers (DB_PATH=/data/trades.db)
+    DB_PATH: str = os.getenv("DB_PATH") or os.path.join(os.path.dirname(__file__), "trades.db")
 
     # Subreddits to scan
     SUBREDDITS: list[str] = ["wallstreetbets", "stocks", "investing"]
