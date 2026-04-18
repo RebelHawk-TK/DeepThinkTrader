@@ -161,6 +161,12 @@ Click into an individual trade from the dashboard or Analytics page to see its f
 
 This is the best page to learn how the bot thinks.
 
+## Settings
+
+Enter, rotate, or delete your Alpaca paper API keys. See Step 5 for the initial flow. The page shows the last 4 characters of the key currently on file so you can tell which pair is active.
+
+Rotation takes effect the next time the bot restarts (usually within a few hours during a scheduled redeploy). If you need an immediate switch, ping Tom.
+
 ## Admin
 
 Only visible if Tom flags your account as admin. Regular users won't see this page.
