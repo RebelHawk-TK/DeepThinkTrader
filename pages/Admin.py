@@ -170,7 +170,7 @@ st.divider()
 # Inline row controls — one container per user for a compact list
 for u in users:
     with st.container(border=True):
-        col_info, col_role, col_enabled, col_danger = st.columns([3, 1.5, 1, 1])
+        col_info, col_role, col_enabled, col_resend, col_danger = st.columns([3, 1.5, 1, 1, 1])
 
         with col_info:
             st.markdown(f"**{u['email']}**")
@@ -209,6 +209,20 @@ for u in users:
             if new_enabled != bool(u["enabled"]):
                 _set_enabled(u["id"], new_enabled)
                 st.rerun()
+
+        with col_resend:
+            if st.button(
+                "Resend",
+                key=f"resend_{u['id']}",
+                use_container_width=True,
+                help="Re-add this user's email to the IAP allowlist. "
+                     "Idempotent — safe to click if they already have access.",
+            ):
+                try:
+                    iap_admin.invite(u["email"])
+                    st.toast(f"Invite resent to {u['email']}", icon="📩")
+                except Exception as exc:
+                    st.error(f"Resend failed: {exc}")
 
         with col_danger:
             is_self = u["email"].lower() == user["email"].lower()
