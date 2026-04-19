@@ -15,7 +15,13 @@ import streamlit as st
 
 from utils.database import Database
 from utils.streamlit_auth import require_auth
-from utils import iap_admin
+from utils import iap_admin, mailer
+
+import os
+_PDF_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "docs", "user-guide.pdf",
+)
 
 
 DASHBOARD_URL = "https://trader.travelforge.ai"
@@ -188,7 +194,14 @@ with st.expander("Invite a user", expanded=False):
             if ok:
                 st.success(msg)
                 st.code(DASHBOARD_URL, language=None)
-                _queue_notify(invite_email.strip().lower())
+                sent_ok, sent_info = mailer.send_invite(
+                    invite_email.strip().lower(), _PDF_PATH
+                )
+                if sent_ok:
+                    st.success(f"✉ Welcome email sent to {invite_email} with onboarding PDF.")
+                else:
+                    _queue_notify(invite_email.strip().lower())
+                    st.warning(f"IAP granted, but email send failed ({sent_info}). Use the mailto banner above to notify manually.")
             else:
                 st.error(msg)
 
@@ -265,10 +278,15 @@ for u in users:
             ):
                 try:
                     iap_admin.invite(u["email"])
-                    _queue_notify(u["email"])
-                    st.toast(f"IAP access granted — now email them", icon="📩")
                 except Exception as exc:
-                    st.error(f"Resend failed: {exc}")
+                    st.error(f"IAP grant failed: {exc}")
+                else:
+                    ok, info = mailer.send_invite(u["email"], _PDF_PATH)
+                    if ok:
+                        st.toast(f"Access granted + email sent to {u['email']}", icon="✉️")
+                    else:
+                        _queue_notify(u["email"])
+                        st.toast(f"Access granted — email send failed ({info}); use mailto banner", icon="📩")
 
         with col_danger:
             is_self = u["email"].lower() == user["email"].lower()
