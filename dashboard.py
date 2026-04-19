@@ -50,6 +50,23 @@ st.set_page_config(page_title="DeepThinkTrader", page_icon=ICON_PATH, layout="wi
 st.image(BANNER_PATH, use_container_width=True)
 apply_theme()
 
+# ── User bar (right-aligned) ───────────────────────────────
+_SIGNOUT_URL = "https://trader.travelforge.ai/?gcp-iap-mode=CLEAR_LOGIN_COOKIE"
+st.markdown(
+    f"""<div style='display:flex;justify-content:flex-end;align-items:center;
+                     gap:14px;padding:6px 4px 2px;margin-bottom:8px;
+                     font-size:0.85rem;'>
+        <span style='color:{BRAND["dim"]};'>Signed in as
+            <span style='color:{BRAND["text"]};font-weight:600;'>{CURRENT_USER["email"]}</span>
+        </span>
+        <a href='{_SIGNOUT_URL}' target='_self'
+           style='background:{BRAND["bg_raised"]};border:1px solid {BRAND["stroke"]};
+                  color:{BRAND["green"]};padding:6px 14px;border-radius:6px;
+                  text-decoration:none;font-weight:600;'>Sign out</a>
+    </div>""",
+    unsafe_allow_html=True,
+)
+
 # ── Market Ticker Bar ──────────────────────────────────────
 @st.cache_data(ttl=60)
 def _fetch_ticker_bar_data():
