@@ -9,7 +9,11 @@ from datetime import datetime
 import streamlit as st
 
 from utils.brand import ICON_PATH as _ICON
+from utils.theme import apply_theme
+from utils.streamlit_auth import require_auth
 st.set_page_config(page_title="DeepThinkTrader — Live Logs", page_icon=_ICON, layout="wide")
+apply_theme()
+require_auth()
 
 LOG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG_FILES = {

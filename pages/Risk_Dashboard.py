@@ -24,7 +24,9 @@ from utils.brand import ICON_PATH as _ICON
 st.set_page_config(page_title="Risk Dashboard", page_icon=_ICON, layout="wide")
 
 from utils.theme import CHART_COLORS, CHART_LAYOUT, apply_theme
+from utils.streamlit_auth import require_auth
 apply_theme()
+require_auth()
 
 db = Database()
 config = Config()

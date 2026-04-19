@@ -7,6 +7,7 @@ straight through to Postgres so the next page refresh reflects them.
 
 from __future__ import annotations
 
+import urllib.parse
 from datetime import datetime
 
 import pandas as pd
@@ -18,6 +19,26 @@ from utils import iap_admin
 
 
 DASHBOARD_URL = "https://trader.travelforge.ai"
+
+
+def _mailto_url(email: str) -> str:
+    """Build a mailto: URL with a pre-filled DeepThinkTrader welcome message."""
+    subject = "You're in — DeepThinkTrader"
+    body = (
+        f"You now have access to DeepThinkTrader. Sign in with this Google "
+        f"account at:\n\n{DASHBOARD_URL}\n\n"
+        f"On first sign-in you'll see 'Account pending approval' — ping me "
+        f"when you land there and I'll flip the toggle.\n\n"
+        f"Onboarding guide: see the PDF attached to my separate email."
+    )
+    return f"mailto:{email}?subject={urllib.parse.quote(subject)}&body={urllib.parse.quote(body)}"
+
+
+def _queue_notify(email: str) -> None:
+    """Remember that this email needs a notification; rendered at top of page."""
+    st.session_state.setdefault("pending_notifies", [])
+    if email not in st.session_state["pending_notifies"]:
+        st.session_state["pending_notifies"].append(email)
 
 
 def _list_users() -> list[dict]:
@@ -120,8 +141,31 @@ st.title("Admin — User Access")
 st.caption(
     "Invite a friend/family member below — we'll grant them IAP access and "
     "pre-enable their account. Deleting a user removes their IAP access too, "
-    "so they can't sign back in until re-invited."
+    "so they can't sign back in until re-invited. **Heads up:** granting IAP "
+    "access does NOT email the user — click the mail link after inviting to "
+    "notify them yourself."
 )
+
+# ── Pending notifications banner (IAP grant succeeded, now notify the human) ──
+pending = st.session_state.get("pending_notifies", [])
+if pending:
+    with st.container(border=True):
+        st.markdown("**📬 Send sign-in link to:**")
+        cols = st.columns(len(pending) + 1)
+        for i, em in enumerate(pending):
+            with cols[i]:
+                st.markdown(
+                    f"<a href='{_mailto_url(em)}' target='_blank' "
+                    f"style='display:block;padding:6px 12px;background:#00D084;"
+                    f"color:#0B0E14;border-radius:6px;text-decoration:none;"
+                    f"font-weight:600;text-align:center;font-size:0.85rem;'>"
+                    f"✉ {em}</a>",
+                    unsafe_allow_html=True,
+                )
+        with cols[-1]:
+            if st.button("Dismiss all", use_container_width=True):
+                st.session_state["pending_notifies"] = []
+                st.rerun()
 
 # ── Invite form ───────────────────────────────────────────────────
 with st.expander("Invite a user", expanded=False):
@@ -144,6 +188,7 @@ with st.expander("Invite a user", expanded=False):
             if ok:
                 st.success(msg)
                 st.code(DASHBOARD_URL, language=None)
+                _queue_notify(invite_email.strip().lower())
             else:
                 st.error(msg)
 
@@ -220,7 +265,8 @@ for u in users:
             ):
                 try:
                     iap_admin.invite(u["email"])
-                    st.toast(f"Invite resent to {u['email']}", icon="📩")
+                    _queue_notify(u["email"])
+                    st.toast(f"IAP access granted — now email them", icon="📩")
                 except Exception as exc:
                     st.error(f"Resend failed: {exc}")
 

@@ -22,6 +22,25 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 _IAP_EMAIL_HEADER = "X-Goog-Authenticated-User-Email"
+# Hitting this URL clears the IAP session cookie and forces re-auth next visit.
+# Reference: https://cloud.google.com/iap/docs/sessions-howto
+_SIGNOUT_URL = "https://trader.travelforge.ai/?gcp-iap-mode=CLEAR_LOGIN_COOKIE"
+
+
+def render_session_sidebar(user: dict) -> None:
+    """Show signed-in email + sign-out link in the sidebar. Call after require_auth()."""
+    import streamlit as st
+
+    st.sidebar.markdown(
+        f"""<div style='padding:12px 8px;border-top:1px solid #2A3446;
+                         margin-top:12px;font-size:0.85rem;color:#7D8590;'>
+            Signed in as<br>
+            <span style='color:#E6EDF3;font-weight:600;'>{user['email']}</span><br>
+            <a href='{_SIGNOUT_URL}' target='_self'
+               style='color:#00D084;text-decoration:none;font-size:0.8rem;'>Sign out</a>
+        </div>""",
+        unsafe_allow_html=True,
+    )
 
 
 def _auth_required() -> bool:
@@ -105,15 +124,25 @@ def _upsert_from_iap(email: str) -> dict:
 
 
 def require_auth() -> dict:
-    """Return the current user, or stop the app with a helpful message."""
+    """Return the current user, or stop the app with a helpful message.
+
+    On success also renders the signed-in email + Sign out link into the
+    sidebar, so every page that calls require_auth() gets the session chrome
+    for free.
+    """
     if not _auth_required():
-        return {
+        user = {
             "email": "dev@localhost",
             "name": "Local Dev",
             "picture_url": None,
             "role": "admin",
             "enabled": True,
         }
+        try:
+            render_session_sidebar(user)
+        except Exception:
+            pass
+        return user
 
     import streamlit as st
 
@@ -140,7 +169,14 @@ def require_auth() -> dict:
             "before the dashboard unlocks. This usually takes a few minutes."
         )
         st.caption("You'll see the dashboard as soon as the toggle flips. Try refreshing.")
+        st.markdown(
+            f"<div style='margin-top:24px;'><a href='{_SIGNOUT_URL}' "
+            f"style='color:#00D084;text-decoration:none;font-size:0.9rem;'>"
+            f"← Sign out and try a different account</a></div>",
+            unsafe_allow_html=True,
+        )
         st.stop()
         return {}
 
+    render_session_sidebar(user)
     return user
