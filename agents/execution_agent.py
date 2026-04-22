@@ -28,20 +28,34 @@ logger = logging.getLogger(__name__)
 
 
 class ExecutionAgent:
-    def __init__(self, db: Database | None = None):
+    def __init__(
+        self,
+        user_id: int,
+        api_key: str,
+        secret_key: str,
+        db: Database | None = None,
+    ):
+        """Per-user execution agent. All trades, slippage records, and edge
+        performance rows written here inherit user_id from the owning caller.
+        """
         self.config = Config()
         self.db = db or Database()
-        self.risk_manager = RiskManager(self.db)
+        self.user_id = user_id
+        self._api_key = api_key
+        self._secret_key = secret_key
+        self.risk_manager = RiskManager(
+            user_id=user_id, api_key=api_key, secret_key=secret_key, db=self.db,
+        )
         self.client = TradingClient(
-            api_key=self.config.ALPACA_API_KEY,
-            secret_key=self.config.ALPACA_SECRET_KEY,
+            api_key=api_key,
+            secret_key=secret_key,
             paper=True,
         )
         # HTTP session for raw API calls that capture X-Request-ID
         self._session = http_requests.Session()
         self._session.headers.update({
-            "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-            "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+            "APCA-API-KEY-ID": api_key,
+            "APCA-API-SECRET-KEY": secret_key,
         })
         # Inject default timeout on every request. requests' default is None
         # (blocks forever), which froze the main loop on 2026-04-15 when an
@@ -65,7 +79,7 @@ class ExecutionAgent:
         try:
             if self._reflection_writer is None:
                 from agents.reflection_writer import ReflectionWriter
-                self._reflection_writer = ReflectionWriter(db=self.db, config=self.config)
+                self._reflection_writer = ReflectionWriter(user_id=self.user_id, db=self.db, config=self.config)
             self._reflection_writer.on_trade_closed(
                 trade_id=trade["id"],
                 ticker=trade["ticker"],
@@ -120,8 +134,8 @@ class ExecutionAgent:
             resp = self._session.get(
                 "https://data.alpaca.markets/v2/stocks/SPY/snapshot",
                 headers={
-                    "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-                    "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                    "APCA-API-KEY-ID": self._api_key,
+                    "APCA-API-SECRET-KEY": self._secret_key,
                 },
             )
             if resp.ok:
@@ -147,8 +161,8 @@ class ExecutionAgent:
             resp = self._session.get(
                 f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot",
                 headers={
-                    "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-                    "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                    "APCA-API-KEY-ID": self._api_key,
+                    "APCA-API-SECRET-KEY": self._secret_key,
                 },
             )
             if resp.ok:
@@ -469,7 +483,7 @@ class ExecutionAgent:
         rr_ratio = take_profit_pct / stop_loss_pct if stop_loss_pct > 0 else 0
 
         # Phase 8a: Warn if this ticker has historically bad slippage
-        historical_slippage = self.db.get_ticker_slippage_avg(ticker)
+        historical_slippage = self.db.get_ticker_slippage_avg(self.user_id, ticker)
         if abs(historical_slippage) > 0.5:
             logger.warning(
                 f"SLIPPAGE WARNING: {ticker} has avg slippage of {historical_slippage:+.2f}% "
@@ -570,7 +584,7 @@ class ExecutionAgent:
                 "order_id": alpaca_order_id,
                 "reasoning": trade_summary,
             }
-            trade_id = self.db.save_trade(trade_record, portfolio=portfolio)
+            trade_id = self.db.save_trade(self.user_id, trade_record, portfolio=portfolio)
 
             # Set original_quantity, edge data, and sector on the trade
             with self.db._get_conn() as conn:
@@ -593,7 +607,7 @@ class ExecutionAgent:
                         actual_price = float(fill_resp.json().get("filled_avg_price", 0) or 0)
                         if actual_price > 0:
                             self.db.save_slippage(
-                                ticker, current_price, actual_price,
+                                self.user_id, ticker, current_price, actual_price,
                                 order_type_str, side_str, shares, portfolio,
                             )
                 except Exception:
@@ -767,8 +781,8 @@ class ExecutionAgent:
             resp = self._session.get(
                 f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot",
                 headers={
-                    "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-                    "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                    "APCA-API-KEY-ID": self._api_key,
+                    "APCA-API-SECRET-KEY": self._secret_key,
                 },
             )
             if resp.ok:
@@ -779,8 +793,8 @@ class ExecutionAgent:
                 bars_resp = self._session.get(
                     f"https://data.alpaca.markets/v2/stocks/{ticker}/bars",
                     headers={
-                        "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-                        "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                        "APCA-API-KEY-ID": self._api_key,
+                        "APCA-API-SECRET-KEY": self._secret_key,
                     },
                     params={"timeframe": "1Day", "limit": "20", "feed": "iex"},
                 )
@@ -830,8 +844,8 @@ class ExecutionAgent:
             resp = self._session.get(
                 f"https://data.alpaca.markets/v2/stocks/{ticker}/snapshot",
                 headers={
-                    "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-                    "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                    "APCA-API-KEY-ID": self._api_key,
+                    "APCA-API-SECRET-KEY": self._secret_key,
                 },
             )
             if resp.ok:
@@ -904,7 +918,7 @@ class ExecutionAgent:
         Returns: number of trades reconciled.
         """
         try:
-            open_trades = self.db.get_open_trades()
+            open_trades = self.db.get_open_trades(self.user_id)
             positions = {p["ticker"] for p in self.get_positions()}
             ghosts = [t for t in open_trades if t["ticker"] not in positions]
             if not ghosts:
@@ -969,7 +983,7 @@ class ExecutionAgent:
                     pnl = round((entry - exit_price) * filled_qty, 2)
 
                 self.db.close_trade(trade_id, exit_price, pnl, exit_reason="alpaca_reconcile")
-                self.db.update_daily_pnl(pnl, pnl > 0)
+                self.db.update_daily_pnl(self.user_id, pnl, pnl > 0)
                 logger.info(
                     f"DB SYNC: Reconciled {ticker} — closed at ${exit_price:.2f}, "
                     f"P&L: ${pnl:+.2f} (was missing from Alpaca positions)"
@@ -1003,7 +1017,7 @@ class ExecutionAgent:
                     pnl = round((entry - last_price) * qty, 2)
 
                 self.db.close_trade(trade_id, last_price, pnl, exit_reason="alpaca_reconcile_estimated")
-                self.db.update_daily_pnl(pnl, pnl > 0)
+                self.db.update_daily_pnl(self.user_id, pnl, pnl > 0)
                 logger.info(
                     f"DB SYNC: Reconciled {ticker} (estimated) — ${last_price:.2f}, "
                     f"P&L: ${pnl:+.2f}"
@@ -1043,7 +1057,7 @@ class ExecutionAgent:
     def check_exit_conditions(self) -> list[dict]:
         """Check open positions against SL, TP, trailing stops, time stops, momentum, and earnings."""
         exits = []
-        open_trades = self.db.get_open_trades()
+        open_trades = self.db.get_open_trades(self.user_id)
         positions = {p["ticker"]: p for p in self.get_positions()}
 
         import time as _time
@@ -1304,7 +1318,7 @@ class ExecutionAgent:
                     )
                     resp.raise_for_status()
                     self.db.close_trade(trade["id"], current, pnl, exit_reason=reason)
-                    self.db.update_daily_pnl(pnl, pnl > 0)
+                    self.db.update_daily_pnl(self.user_id, pnl, pnl > 0)
                     notify_trade_exited(ticker, reason, pnl)
                     logger.info(
                         f"EXIT — {ticker}: {reason} | P&L: ${pnl:.2f} | X-Request-ID: {req_id}"

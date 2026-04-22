@@ -103,7 +103,7 @@ def test_multiplier_thresholds():
 # ─────────────────────── RiskManager integration ───────────────────
 
 
-def test_risk_manager_applies_correlation_multiplier_when_broker_given(risk_manager, db):
+def test_risk_manager_applies_correlation_multiplier_when_broker_given(risk_manager, db, test_user_id):
     """With a mocked broker returning high correlation, position size shrinks."""
     from brokers.mock import MockBroker
 
@@ -115,7 +115,7 @@ def test_risk_manager_applies_correlation_multiplier_when_broker_given(risk_mana
         broker.ingest_bar(b)
 
     # Seed an existing position so "held_tickers" is non-empty.
-    db.save_trade({
+    db.save_trade(test_user_id, {
         "ticker": "AMD", "action": "BUY", "quantity": 10,
         "entry_price": 100.0, "stop_loss_price": 95.0,
         "take_profit_price": 110.0, "conviction": 8.0, "order_id": "ord-amd",

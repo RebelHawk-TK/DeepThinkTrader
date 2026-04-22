@@ -15,7 +15,6 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, StockLatestBarRequest, StockSnapshotRequest
 from alpaca.data.timeframe import TimeFrame
 
-from config import Config
 from utils.database import Database
 
 logger = logging.getLogger(__name__)
@@ -24,18 +23,23 @@ ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 
 
 class AlpacaMarketData:
-    def __init__(self, db: Database | None = None):
-        self.config = Config()
+    def __init__(self, api_key: str, secret_key: str, db: Database | None = None):
+        """Market data client scoped to one Alpaca account.
+
+        Market data is the same for every user, but each request authenticates
+        with the caller's keys so rate limits apply per-account. Callers
+        supply keys via ``secrets_vault.get_alpaca_keys(user_id)``.
+        """
         self.db = db or Database()
         self.sdk_client = StockHistoricalDataClient(
-            api_key=self.config.ALPACA_API_KEY,
-            secret_key=self.config.ALPACA_SECRET_KEY,
+            api_key=api_key,
+            secret_key=secret_key,
         )
         # Raw HTTP session for X-Request-ID capture
         self._session = http_requests.Session()
         self._session.headers.update({
-            "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-            "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+            "APCA-API-KEY-ID": api_key,
+            "APCA-API-SECRET-KEY": secret_key,
         })
 
     def _capture_request_id(

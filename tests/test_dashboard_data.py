@@ -226,17 +226,17 @@ def test_drawdown_empty_hist_is_zero():
 # ─────────────────────────── Kelly state ────────────────────────────────
 
 
-def test_kelly_state_insufficient_history(db, risk_manager):
+def test_kelly_state_insufficient_history(db, risk_manager, test_user_id):
     # Fresh DB → 0 trades, no Kelly.
-    s = compute_kelly_state(db, risk_manager)
+    s = compute_kelly_state(db, risk_manager, test_user_id)
     assert s["fraction"] is None
     assert s["n_trades"] == 0
 
 
-def test_kelly_state_with_enough_history(db, risk_manager):
+def test_kelly_state_with_enough_history(db, risk_manager, test_user_id):
     # Seed 25 closed trades, mixed outcomes.
     for i in range(25):
-        tid = db.save_trade({
+        tid = db.save_trade(test_user_id, {
             "ticker": f"T{i}", "action": "BUY", "quantity": 1,
             "entry_price": 100.0, "stop_loss_price": 95.0,
             "take_profit_price": 110.0, "conviction": 7.0,
@@ -244,7 +244,7 @@ def test_kelly_state_with_enough_history(db, risk_manager):
         })
         db.close_trade(tid, exit_price=105.0 if i % 2 == 0 else 98.0,
                        pnl=5.0 if i % 2 == 0 else -5.0, exit_reason="test")
-    s = compute_kelly_state(db, risk_manager)
+    s = compute_kelly_state(db, risk_manager, test_user_id)
     assert s["n_trades"] >= 20
     # With ~50% win rate, the Kelly fraction may fall to the 0.5% floor.
     assert s["fraction"] is not None
@@ -253,21 +253,21 @@ def test_kelly_state_with_enough_history(db, risk_manager):
 # ─────────────────────────── Reflections ────────────────────────────────
 
 
-def test_recent_reflections_empty_db(db):
-    assert compute_recent_reflections(db) == []
+def test_recent_reflections_empty_db(db, test_user_id):
+    assert compute_recent_reflections(db, test_user_id) == []
 
 
-def test_recent_reflections_returns_most_recent(db):
-    tid = db.save_trade({
+def test_recent_reflections_returns_most_recent(db, test_user_id):
+    tid = db.save_trade(test_user_id, {
         "ticker": "NVDA", "action": "BUY", "quantity": 10,
         "entry_price": 100.0, "stop_loss_price": 95.0,
         "take_profit_price": 110.0, "conviction": 7.0, "order_id": "o1",
     })
     for i in range(5):
         db.save_reflection(
-            trade_id=tid, ticker="NVDA", thesis="test",
+            user_id=test_user_id, trade_id=tid, ticker="NVDA", thesis="test",
             outcome_pnl=10.0 * (1 if i % 2 == 0 else -1),
             lesson=f"lesson {i}",
         )
-    rows = compute_recent_reflections(db, limit=3)
+    rows = compute_recent_reflections(db, test_user_id, limit=3)
     assert len(rows) == 3

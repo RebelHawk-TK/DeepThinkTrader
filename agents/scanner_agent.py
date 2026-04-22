@@ -77,11 +77,21 @@ SECTOR_POOL = {
 
 
 class ScannerAgent:
-    def __init__(self, db: Database | None = None):
+    def __init__(
+        self,
+        user_id: int,
+        api_key: str,
+        secret_key: str,
+        db: Database | None = None,
+    ):
+        """Per-user scanner. Scanners discover tickers from global market data
+        but hit Alpaca with the running user's keys (rate limit scope).
+        """
         self.config = Config()
         self.db = db or Database()
+        self.user_id = user_id
         self.rate_limiter = RateLimiter()
-        self.alpaca_data = AlpacaMarketData(self.db)
+        self.alpaca_data = AlpacaMarketData(api_key=api_key, secret_key=secret_key, db=self.db)
         self._session = self.alpaca_data._session
         self._data_url = "https://data.alpaca.markets"
         self._trading_url = self.config.ALPACA_BASE_URL

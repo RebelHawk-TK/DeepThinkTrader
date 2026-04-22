@@ -12,9 +12,24 @@ logger = logging.getLogger(__name__)
 
 
 class RiskManager:
-    def __init__(self, db: Database | None = None):
+    def __init__(
+        self,
+        user_id: int,
+        api_key: str | None = None,
+        secret_key: str | None = None,
+        db: Database | None = None,
+    ):
+        """Per-user risk manager. Every db query is scoped to self.user_id;
+        Alpaca-authenticated calls (market clock, account reads) require the
+        user's keys. Keys are optional for callers that only need read-only
+        helpers like check_sector_trend — those use yfinance and don't need
+        credentials.
+        """
         self.db = db or Database()
         self.config = Config()
+        self.user_id = user_id
+        self._api_key = api_key
+        self._secret_key = secret_key
         # In-memory cache for earnings dates (ticker -> (date_str, fetched_at))
         self._earnings_cache: dict[str, tuple[str | None, datetime]] = {}
 
@@ -59,7 +74,7 @@ class RiskManager:
         params = self._get_params(portfolio)
 
         # Try Kelly sizing if we have enough trade history
-        stats = self.db.get_strategy_stats(portfolio)
+        stats = self.db.get_strategy_stats(self.user_id, portfolio)
         if stats["trade_count"] >= 20 and stats["payoff_ratio"] > 0:
             kelly_fraction = self._kelly_fraction(
                 stats["win_rate"], stats["payoff_ratio"], n_trades=stats["trade_count"],
@@ -105,7 +120,7 @@ class RiskManager:
                 average_correlation,
                 correlation_size_multiplier,
             )
-            held = [t["ticker"] for t in self.db.get_open_trades()]
+            held = [t["ticker"] for t in self.db.get_open_trades(self.user_id)]
             if not held:
                 return 1.0
             avg = average_correlation(broker, ticker, held)
@@ -193,8 +208,8 @@ class RiskManager:
         try:
             import requests as _rq
             headers = {
-                "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-                "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+                "APCA-API-KEY-ID": self._api_key,
+                "APCA-API-SECRET-KEY": self._secret_key,
             }
             # Request ~days of daily bars. Alpaca accepts "1A","3M","1M","5D" — pick nearest.
             period = "1M" if days <= 30 else ("3M" if days <= 90 else "1A")
@@ -273,7 +288,7 @@ class RiskManager:
 
         RoR ≈ e^(-2 × edge × capital / risk_per_trade). Block if > MAX_RISK_OF_RUIN_PCT.
         """
-        stats = self.db.get_strategy_stats(portfolio)
+        stats = self.db.get_strategy_stats(self.user_id, portfolio)
         if stats["trade_count"] < 20:
             return True  # Not enough data, allow trading
 
@@ -378,7 +393,7 @@ class RiskManager:
         if not sector or sector == "Unknown":
             return True  # Can't validate without sector data
 
-        open_trades = self.db.get_open_trades()
+        open_trades = self.db.get_open_trades(self.user_id)
         sector_exposure = 0.0
 
         for trade in open_trades:
@@ -428,7 +443,7 @@ class RiskManager:
             from analytics.cvar import candidate_would_breach_cvar
             holdings = {
                 t["ticker"]: (t.get("entry_price", 0) or 0) * (t.get("quantity", 0) or 0)
-                for t in self.db.get_open_trades()
+                for t in self.db.get_open_trades(self.user_id)
             }
             breached, projected = candidate_would_breach_cvar(
                 broker=broker,
@@ -670,9 +685,8 @@ class RiskManager:
     def check_warmup_complete(self) -> bool:
         """Return True if enough unique tickers have been analyzed to start trading.
 
-        Blocks all execution until WARMUP_MIN_TICKERS unique tickers have been
-        analyzed in the current session (since last DB reset). This ensures the
-        bot has surveyed the full market before committing capital.
+        Per-user warmup: each user gets their own survey window. A new user's
+        bot won't trade until their own analyses have covered enough tickers.
         """
         min_tickers = self.config.WARMUP_MIN_TICKERS
         if min_tickers <= 0:
@@ -680,7 +694,8 @@ class RiskManager:
 
         with self.db._get_conn() as conn:
             row = conn.execute(
-                "SELECT COUNT(DISTINCT ticker) as n FROM analysis_results"
+                "SELECT COUNT(DISTINCT ticker) as n FROM analysis_results WHERE user_id = ?",
+                (self.user_id,),
             ).fetchone()
         analyzed = row["n"] if row else 0
 
@@ -695,24 +710,24 @@ class RiskManager:
 
     def check_daily_loss_limit(self, account_value: float) -> bool:
         """Return True if we're still within daily loss limit."""
-        today_pnl = self.db.get_today_pnl()
+        today_pnl = self.db.get_today_pnl(self.user_id)
         max_daily_loss = account_value * self.config.MAX_DAILY_LOSS
         return today_pnl["realized_pnl"] > -max_daily_loss
 
     def check_open_position_count(self, portfolio: str = "main") -> bool:
         """Return True if we can open another position."""
         params = self._get_params(portfolio)
-        open_trades = self.db.get_open_trades(portfolio=portfolio)
+        open_trades = self.db.get_open_trades(self.user_id, portfolio=portfolio)
         return len(open_trades) < params["max_open_positions"]
 
     def check_duplicate_position(self, ticker: str) -> bool:
         """Return True if we DON'T already have an open position in this ticker."""
-        open_trades = self.db.get_open_trades()
+        open_trades = self.db.get_open_trades(self.user_id)
         return not any(t["ticker"] == ticker for t in open_trades)
 
     def is_market_hours(self) -> bool:
         """Check if US market is currently open via Alpaca clock API."""
-        return get_market_clock().is_market_open()
+        return get_market_clock(self._api_key, self._secret_key).is_market_open()
 
     def validate_trade(
         self,
@@ -777,7 +792,7 @@ class RiskManager:
 
     def is_revenge_trading(self, portfolio: str = "main") -> bool:
         """Check if recent losses suggest emotional/revenge trading."""
-        recent = self.db.get_recent_trades(limit=5, portfolio=portfolio)
+        recent = self.db.get_recent_trades(self.user_id, limit=5, portfolio=portfolio)
         if len(recent) < 3:
             return False
         last_3 = recent[:3]

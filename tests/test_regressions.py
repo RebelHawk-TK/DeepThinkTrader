@@ -111,15 +111,15 @@ def test_b2_fetch_equity_filters_settlement_artifacts(risk_manager):
 # ─────────────────── B3: ghost reconcile throttled in exit loop ────────────
 
 
-def test_b3_ghost_reconcile_fires_from_check_exit_conditions(db, monkeypatch):
+def test_b3_ghost_reconcile_fires_from_check_exit_conditions(db, test_user_id, monkeypatch):
     """Trade marked OPEN in DB but absent from Alpaca positions must trigger
     `_reconcile_missing_position` from within check_exit_conditions — not wait
     for bot restart.
     """
     from agents.execution_agent import ExecutionAgent
 
-    ea = ExecutionAgent(db=db)
-    trade_id = db.save_trade({
+    ea = ExecutionAgent(user_id=test_user_id, api_key="test-key", secret_key="test-secret", db=db)
+    trade_id = db.save_trade(test_user_id, {
         "ticker": "GHOST", "action": "BUY", "quantity": 10,
         "entry_price": 100.0, "stop_loss_price": 95.0,
         "take_profit_price": 110.0, "conviction": 8.0, "order_id": "fake-ord-1",
@@ -140,15 +140,15 @@ def test_b3_ghost_reconcile_fires_from_check_exit_conditions(db, monkeypatch):
     assert called["ticker"] == "GHOST"
 
 
-def test_b3_ghost_reconcile_throttles_per_ticker(db, monkeypatch):
+def test_b3_ghost_reconcile_throttles_per_ticker(db, test_user_id, monkeypatch):
     """Second call within the throttle window must NOT re-invoke reconcile —
     that's what kept the old code from fixing this; we want a cleaner retry,
     not a log flood.
     """
     from agents.execution_agent import ExecutionAgent
 
-    ea = ExecutionAgent(db=db)
-    db.save_trade({
+    ea = ExecutionAgent(user_id=test_user_id, api_key="test-key", secret_key="test-secret", db=db)
+    db.save_trade(test_user_id, {
         "ticker": "GHOST", "action": "BUY", "quantity": 10,
         "entry_price": 100.0, "stop_loss_price": 95.0,
         "take_profit_price": 110.0, "conviction": 8.0, "order_id": "fake-ord-1",

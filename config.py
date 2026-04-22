@@ -64,9 +64,9 @@ class Config:
     # Load mode preset, fall back to normal if invalid
     _mode = TRADE_MODES.get(TRADE_MODE, TRADE_MODES["normal"])
 
-    # Alpaca
-    ALPACA_API_KEY: str = _secret("alpaca_api_key", "ALPACA_API_KEY")
-    ALPACA_SECRET_KEY: str = _secret("alpaca_secret_key", "ALPACA_SECRET_KEY")
+    # Alpaca — credentials are per-user (stored encrypted in user_secrets).
+    # ALPACA_API_KEY / ALPACA_SECRET_KEY moved out of Config entirely; the bot
+    # loads each user's keys via utils.secrets_vault.get_alpaca_keys(user_id).
     ALPACA_BASE_URL: str = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
     # NewsAPI
@@ -126,7 +126,7 @@ class Config:
         "MAX_DAILY_LOSS", str(_mode["MAX_DAILY_LOSS"])))
     MIN_CONVICTION: float = float(os.getenv(
         "MIN_CONVICTION", str(_mode["MIN_CONVICTION"])))
-    RESEARCH_INTERVAL_MINUTES: int = int(os.getenv("RESEARCH_INTERVAL_MINUTES", "15"))
+    RESEARCH_INTERVAL_MINUTES: int = int(os.getenv("RESEARCH_INTERVAL_MINUTES", "30"))
     MIN_REWARD_RISK_RATIO: float = float(os.getenv(
         "MIN_REWARD_RISK_RATIO", str(_mode["MIN_REWARD_RISK_RATIO"])))
     MAX_POSITION_PCT: float = float(os.getenv(
@@ -230,11 +230,9 @@ class Config:
         errors: list[str] = []
         warnings: list[str] = []
 
-        # Required API keys
-        if not cls.ALPACA_API_KEY:
-            errors.append("ALPACA_API_KEY is required")
-        if not cls.ALPACA_SECRET_KEY:
-            errors.append("ALPACA_SECRET_KEY is required")
+        # Alpaca creds are per-user (user_secrets table); nothing global to
+        # validate here. The orchestrator checks for "any active user with
+        # keys" and sleeps the cycle if none exist.
         if not cls.NEWSAPI_KEY:
             warnings.append("NEWSAPI_KEY not set — news research will fail")
 

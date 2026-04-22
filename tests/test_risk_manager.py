@@ -147,9 +147,9 @@ def test_sector_concentration_within_limit_passes(risk_manager, db):
     ) is True
 
 
-def test_sector_concentration_over_limit_blocks(risk_manager, db):
+def test_sector_concentration_over_limit_blocks(risk_manager, db, test_user_id):
     # Seed a big existing Tech position that already eats the cap.
-    db.save_trade({
+    db.save_trade(test_user_id, {
         "ticker": "AAPL", "action": "BUY", "quantity": 100, "entry_price": 300.0,
         "stop_loss_price": 285.0, "take_profit_price": 330.0, "conviction": 8.0,
         "order_id": "ord1",

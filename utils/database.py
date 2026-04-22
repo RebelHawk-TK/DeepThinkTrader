@@ -12,8 +12,11 @@ logger = logging.getLogger(__name__)
 
 
 class Database:
-    def __init__(self, db_path: str = Config.DB_PATH):
-        self.db_path = db_path
+    def __init__(self, db_path: str | None = None):
+        # Evaluate Config.DB_PATH at call time so tests that monkeypatch the
+        # class attr get the patched value. Using ``db_path=Config.DB_PATH``
+        # as a default binds at class-definition time and misses the patch.
+        self.db_path = db_path if db_path is not None else Config.DB_PATH
 
         if db_engine.is_sqlite():
             self._enable_wal()
@@ -43,7 +46,7 @@ class Database:
 
     def _verify_pg_schema(self) -> None:
         """Fail fast if core tables missing on Postgres (alembic not run yet)."""
-        required = ("trades", "research_reports", "analysis_results")
+        required = ("trades", "research_reports", "analysis_results", "users", "user_secrets")
         with self._get_conn() as conn:
             cur = conn.execute(
                 "SELECT table_name FROM information_schema.tables "
@@ -83,7 +86,6 @@ class Database:
                 result: dict = {"status": "ok", "tables": {}}
                 for row in rows:
                     name = row["name"]
-                    # Quoting matches both dialects for simple table names
                     count = conn.execute(f'SELECT COUNT(*) AS n FROM "{name}"').fetchone()
                     result["tables"][name] = count["n"] if count else 0
 
@@ -97,10 +99,43 @@ class Database:
             return {"status": "error", "error": str(e)}
 
     def _init_tables(self) -> None:
+        """SQLite-only dev path. Postgres uses alembic migrations.
+
+        Schema here mirrors what the migrations produce: every user-scoped
+        table carries user_id (NOT NULL on prod; nullable here so local dev
+        can still exercise code paths without a users row seeded). Existing
+        dev DBs from the pre-0004 schema get a lazy ``user_id`` column
+        added — CREATE TABLE IF NOT EXISTS is a no-op when the table is
+        already there, so we need explicit ALTERs too.
+        """
         with self._get_conn() as conn:
+            self._migrate_add_user_id(conn)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email TEXT UNIQUE NOT NULL,
+                    name TEXT,
+                    picture_url TEXT,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_login_at TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS user_secrets (
+                    user_id INTEGER PRIMARY KEY,
+                    alpaca_key_id_enc BLOB NOT NULL,
+                    alpaca_secret_enc BLOB NOT NULL,
+                    alpaca_key_id_tail TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS research_reports (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
                     ticker TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     news_impact_score REAL,
@@ -113,6 +148,7 @@ class Database:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS analysis_results (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
                     ticker TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     action TEXT NOT NULL,
@@ -128,6 +164,7 @@ class Database:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
                     ticker TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     action TEXT NOT NULL,
@@ -142,24 +179,31 @@ class Database:
                     pnl REAL,
                     order_id TEXT,
                     reasoning TEXT,
-                    portfolio TEXT DEFAULT 'main'
+                    portfolio TEXT DEFAULT 'main',
+                    trailing_stop_price REAL,
+                    highest_price REAL,
+                    trailing_stop_active INTEGER DEFAULT 0,
+                    original_quantity INTEGER,
+                    exit_reason TEXT,
+                    edges_fired INTEGER,
+                    edge_details TEXT,
+                    risk_amount REAL,
+                    sector TEXT
                 )
             """)
-            # Migrate existing tables: add portfolio column if missing
-            self._migrate_add_portfolio(conn)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS daily_pnl (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date TEXT NOT NULL UNIQUE,
+                    user_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,
                     realized_pnl REAL DEFAULT 0,
                     unrealized_pnl REAL DEFAULT 0,
                     trades_taken INTEGER DEFAULT 0,
                     trades_won INTEGER DEFAULT 0,
-                    trades_lost INTEGER DEFAULT 0
+                    trades_lost INTEGER DEFAULT 0,
+                    UNIQUE(user_id, date)
                 )
             """)
-            # Run additional migrations
-            self._migrate_trailing_stops(conn)
             self._init_partial_exits_table(conn)
             self._init_atr_history_table(conn)
             self._init_slippage_table(conn)
@@ -179,42 +223,81 @@ class Database:
                 )
             """)
             # Indexes — dashboard queries filter heavily on these columns.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_user_id ON trades(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_portfolio ON trades(portfolio)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_ticker ON analysis_results(ticker)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_analysis_user_id ON analysis_results(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_research_ticker ON research_reports(ticker)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_research_user_id ON research_reports(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_slippage_user_id ON slippage_records(user_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_edge_user_id ON edge_performance(user_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_reflections_ticker ON reflections(ticker)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_reflections_created ON reflections(created_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_reflections_user_id ON reflections(user_id)")
 
-    def _migrate_add_portfolio(self, conn: sqlite3.Connection) -> None:
-        """Add portfolio column to existing tables if not present."""
-        for table in ("trades", "research_reports", "analysis_results"):
-            cols = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-            if "portfolio" not in cols:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN portfolio TEXT DEFAULT 'main'")
+    def _migrate_add_user_id(self, conn: sqlite3.Connection) -> None:
+        """Add user_id column to tables that existed pre-0004.
 
-    def _migrate_trailing_stops(self, conn: sqlite3.Connection) -> None:
-        """Add trailing stop and scale-out columns to trades table."""
-        cols = [row[1] for row in conn.execute("PRAGMA table_info(trades)").fetchall()]
-        migrations = {
-            "trailing_stop_price": "REAL",
-            "highest_price": "REAL",
-            "trailing_stop_active": "INTEGER DEFAULT 0",
-            "original_quantity": "INTEGER",
-            "exit_reason": "TEXT",
-            "edges_fired": "INTEGER",
-            "edge_details": "TEXT",
-            "risk_amount": "REAL",
-            "sector": "TEXT",
-        }
-        for col, col_type in migrations.items():
-            if col not in cols:
-                conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+        Only runs on SQLite dev DBs. A fresh DB doesn't need this (the
+        CREATE TABLE statements below already include user_id); an existing
+        DB from before the multi-tenant refactor does.
+
+        Also rebuilds daily_pnl when its UNIQUE constraint is still on
+        (date) alone — SQLite can't ALTER a UNIQUE in place, so we
+        swap the table. Pre-0004 rows are wiped, matching migration 0004.
+        """
+        user_scoped = (
+            "trades", "research_reports", "analysis_results",
+            "slippage_records", "edge_performance", "reflections", "daily_pnl",
+        )
+        for table in user_scoped:
+            try:
+                cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            except sqlite3.OperationalError:
+                continue  # table not yet created — CREATE TABLE below will include user_id
+            if cols and "user_id" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER")
+
+        self._migrate_daily_pnl_unique(conn)
+
+    def _migrate_daily_pnl_unique(self, conn: sqlite3.Connection) -> None:
+        """Rebuild daily_pnl when it still has UNIQUE(date) instead of
+        UNIQUE(user_id, date). No-op on fresh DBs (table doesn't exist
+        yet) and on already-migrated DBs.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='daily_pnl'"
+        ).fetchone()
+        if row is None:
+            return  # fresh DB; CREATE TABLE below gets it right
+        ddl = row["sql"] or ""
+        if "UNIQUE(user_id" in ddl.replace(" ", ""):
+            return  # already rebuilt
+
+        # Pre-0004 rows had no owner — migration 0004 wipes them in prod,
+        # so drop them here too rather than forge attribution. NOT NULL on
+        # user_id matches the CREATE TABLE statement fresh DBs use.
+        conn.execute("""
+            CREATE TABLE daily_pnl_new (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                realized_pnl REAL DEFAULT 0,
+                unrealized_pnl REAL DEFAULT 0,
+                trades_taken INTEGER DEFAULT 0,
+                trades_won INTEGER DEFAULT 0,
+                trades_lost INTEGER DEFAULT 0,
+                UNIQUE(user_id, date)
+            )
+        """)
+        conn.execute("DROP TABLE daily_pnl")
+        conn.execute("ALTER TABLE daily_pnl_new RENAME TO daily_pnl")
 
     def _init_partial_exits_table(self, conn: sqlite3.Connection) -> None:
-        """Create partial_exits table for scale-out tracking."""
+        """Create partial_exits table. Ownership inherited via trade_id FK."""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS partial_exits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -230,7 +313,7 @@ class Database:
         """)
 
     def _init_atr_history_table(self, conn: sqlite3.Connection) -> None:
-        """Create atr_history table for true median ATR calculation."""
+        """Global ticker-level ATR cache — shared across users."""
         conn.execute("""
             CREATE TABLE IF NOT EXISTS atr_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -240,6 +323,94 @@ class Database:
                 UNIQUE(ticker, date)
             )
         """)
+
+    def _init_slippage_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS slippage_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                ticker TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                expected_price REAL NOT NULL,
+                filled_price REAL NOT NULL,
+                slippage_pct REAL NOT NULL,
+                order_type TEXT NOT NULL,
+                side TEXT NOT NULL,
+                shares INTEGER,
+                hour_of_day INTEGER,
+                portfolio TEXT DEFAULT 'main'
+            )
+        """)
+
+    def _init_edge_performance_table(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS edge_performance (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                trade_id INTEGER NOT NULL,
+                ticker TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                edge_combo TEXT NOT NULL,
+                edges_fired INTEGER NOT NULL,
+                fund_passed INTEGER,
+                tech_passed INTEGER,
+                sent_passed INTEGER,
+                conviction REAL,
+                pnl REAL,
+                won INTEGER,
+                portfolio TEXT DEFAULT 'main',
+                FOREIGN KEY (trade_id) REFERENCES trades(id)
+            )
+        """)
+
+    def _init_reflections_table(self, conn: sqlite3.Connection) -> None:
+        """Post-trade lesson memory — feeds retrieval-augmented prompting."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS reflections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                trade_id INTEGER NOT NULL,
+                ticker TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                thesis TEXT NOT NULL,
+                outcome_pnl REAL NOT NULL,
+                outcome_label TEXT NOT NULL,
+                lesson TEXT NOT NULL,
+                FOREIGN KEY (trade_id) REFERENCES trades(id)
+            )
+        """)
+
+    # ── User lookup for bot orchestration ───────────────────────
+
+    def get_active_user_ids(self) -> list[int]:
+        """Return user ids that are enabled AND have Alpaca keys on file.
+
+        Drives the bot's per-user loop. Disabled or keyless users are skipped.
+        """
+        # Postgres stores enabled as BOOLEAN, SQLite as INTEGER. `enabled`
+        # alone evaluates truthy on both (Postgres: TRUE; SQLite: nonzero).
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                """SELECT u.id FROM users u
+                   JOIN user_secrets s ON s.user_id = u.id
+                   WHERE u.enabled
+                   ORDER BY u.id"""
+            ).fetchall()
+            return [r["id"] for r in rows]
+
+    def user_exists(self, user_id: int) -> bool:
+        """Belt-and-suspenders FK guard: confirm a user row exists before
+        trusting an id returned by get_active_user_ids(). Guards against
+        orphan user_secrets rows or cross-schema mismatches that would
+        otherwise trip a FK violation on save_research / save_analysis.
+        """
+        with self._get_conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM users WHERE id = ? LIMIT 1", (user_id,)
+            ).fetchone()
+            return row is not None
+
+    # ── ATR cache (global, unchanged) ──────────────────────────
 
     def save_atr(self, ticker: str, atr_value: float) -> None:
         """Store daily ATR value for a ticker."""
@@ -264,9 +435,7 @@ class Database:
             ).fetchall()
 
         if len(rows) < 5:
-            # Seed historical ATR from yfinance
             self._seed_atr_history(ticker)
-            # Re-query after seeding
             with self._get_conn() as conn:
                 rows = conn.execute(
                     """SELECT atr_value FROM atr_history
@@ -297,7 +466,6 @@ class Database:
             low = hist["Low"].values
             close = hist["Close"].values
 
-            # True Range calculation
             tr = np.maximum(
                 high[1:] - low[1:],
                 np.maximum(
@@ -306,7 +474,6 @@ class Database:
                 ),
             )
 
-            # 14-day ATR rolling average
             atr_period = 14
             if len(tr) < atr_period:
                 return
@@ -325,69 +492,11 @@ class Database:
         except Exception as e:
             logger.warning(f"Failed to seed ATR history for {ticker}: {e}")
 
-    def _init_slippage_table(self, conn: sqlite3.Connection) -> None:
-        """Create slippage_records table for tracking fill quality."""
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS slippage_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ticker TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                expected_price REAL NOT NULL,
-                filled_price REAL NOT NULL,
-                slippage_pct REAL NOT NULL,
-                order_type TEXT NOT NULL,
-                side TEXT NOT NULL,
-                shares INTEGER,
-                hour_of_day INTEGER,
-                portfolio TEXT DEFAULT 'main'
-            )
-        """)
-
-    def _init_edge_performance_table(self, conn: sqlite3.Connection) -> None:
-        """Create edge_performance table for tracking which edge combos win."""
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS edge_performance (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_id INTEGER NOT NULL,
-                ticker TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                edge_combo TEXT NOT NULL,
-                edges_fired INTEGER NOT NULL,
-                fund_passed INTEGER,
-                tech_passed INTEGER,
-                sent_passed INTEGER,
-                conviction REAL,
-                pnl REAL,
-                won INTEGER,
-                portfolio TEXT DEFAULT 'main',
-                FOREIGN KEY (trade_id) REFERENCES trades(id)
-            )
-        """)
-
-    def _init_reflections_table(self, conn: sqlite3.Connection) -> None:
-        """Post-trade lesson memory — feeds retrieval-augmented prompting.
-
-        Based on TradingAgents (arXiv:2412.20138) and FinMem (arXiv:2311.13743)
-        — both show post-trade reflection written back into agent context
-        materially improves Sharpe. Start simple: recency-based retrieval.
-        Semantic retrieval (embeddings) is a future extension.
-        """
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS reflections (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                trade_id INTEGER NOT NULL,
-                ticker TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                thesis TEXT NOT NULL,
-                outcome_pnl REAL NOT NULL,
-                outcome_label TEXT NOT NULL,
-                lesson TEXT NOT NULL,
-                FOREIGN KEY (trade_id) REFERENCES trades(id)
-            )
-        """)
+    # ── Reflections ──────────────────────────────────────────
 
     def save_reflection(
         self,
+        user_id: int,
         trade_id: int,
         ticker: str,
         thesis: str,
@@ -399,30 +508,25 @@ class Database:
         with self._get_conn() as conn:
             cur = conn.execute(
                 """INSERT INTO reflections
-                   (trade_id, ticker, created_at, thesis, outcome_pnl, outcome_label, lesson)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (trade_id, ticker, datetime.now().isoformat(),
+                   (user_id, trade_id, ticker, created_at, thesis, outcome_pnl, outcome_label, lesson)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, trade_id, ticker, datetime.now().isoformat(),
                  thesis[:2000], outcome_pnl, label, lesson[:2000]),
             )
             return cur.lastrowid or 0
 
     def get_reflections(
-        self, ticker: str | None = None, limit: int = 5
+        self, user_id: int, ticker: str | None = None, limit: int = 5
     ) -> list[dict]:
-        """Most recent reflections, optionally scoped to a ticker.
-
-        Tickered reflections come first (when ticker given), then global
-        recent lessons fill any remaining slots. This is the retrieval half
-        of the memory loop — keep it simple until a vector store lands.
-        """
+        """Most recent reflections for a user, optionally scoped to a ticker."""
         rows: list[dict] = []
         with self._get_conn() as conn:
             if ticker:
                 tickered = conn.execute(
                     """SELECT * FROM reflections
-                       WHERE ticker = ?
+                       WHERE user_id = ? AND ticker = ?
                        ORDER BY created_at DESC LIMIT ?""",
-                    (ticker, limit),
+                    (user_id, ticker, limit),
                 ).fetchall()
                 rows.extend(dict(r) for r in tickered)
             remaining = limit - len(rows)
@@ -430,18 +534,19 @@ class Database:
                 seen_ids = {r["id"] for r in rows}
                 global_recent = conn.execute(
                     """SELECT * FROM reflections
+                       WHERE user_id = ?
                        ORDER BY created_at DESC LIMIT ?""",
-                    (remaining + len(rows),),
+                    (user_id, remaining + len(rows)),
                 ).fetchall()
                 for r in global_recent:
                     if r["id"] not in seen_ids and len(rows) < limit:
                         rows.append(dict(r))
         return rows
 
-    # ── Phase 8a: Slippage Analytics ───────────────────────────
+    # ── Slippage Analytics ─────────────────────────────────────
 
     def save_slippage(
-        self, ticker: str, expected_price: float, filled_price: float,
+        self, user_id: int, ticker: str, expected_price: float, filled_price: float,
         order_type: str, side: str, shares: int, portfolio: str = "main",
     ) -> None:
         """Record slippage for every filled order."""
@@ -452,55 +557,49 @@ class Database:
         with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO slippage_records
-                   (ticker, timestamp, expected_price, filled_price, slippage_pct,
+                   (user_id, ticker, timestamp, expected_price, filled_price, slippage_pct,
                     order_type, side, shares, hour_of_day, portfolio)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (ticker, datetime.now().isoformat(), expected_price, filled_price,
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, ticker, datetime.now().isoformat(), expected_price, filled_price,
                  round(slippage_pct, 4), order_type, side, shares, hour, portfolio),
             )
 
-    def get_slippage_analytics(self, days: int = 30) -> dict:
-        """Aggregate slippage data for reporting and warnings.
-
-        Returns by-ticker and by-hour breakdowns.
-        """
+    def get_slippage_analytics(self, user_id: int, days: int = 30) -> dict:
+        """Aggregate slippage data for reporting and warnings."""
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
 
         with self._get_conn() as conn:
-            # By ticker: avg slippage, total cost
             ticker_rows = conn.execute(
                 """SELECT ticker,
                           COUNT(*) as count,
                           AVG(slippage_pct) as avg_slippage,
                           SUM(ABS(slippage_pct) * shares * expected_price / 100) as total_cost
                    FROM slippage_records
-                   WHERE timestamp >= ?
+                   WHERE user_id = ? AND timestamp >= ?
                    GROUP BY ticker
                    ORDER BY avg_slippage DESC""",
-                (cutoff,),
+                (user_id, cutoff),
             ).fetchall()
 
-            # By hour of day
             hour_rows = conn.execute(
                 """SELECT hour_of_day,
                           COUNT(*) as count,
                           AVG(slippage_pct) as avg_slippage
                    FROM slippage_records
-                   WHERE timestamp >= ?
+                   WHERE user_id = ? AND timestamp >= ?
                    GROUP BY hour_of_day
                    ORDER BY hour_of_day""",
-                (cutoff,),
+                (user_id, cutoff),
             ).fetchall()
 
-            # Overall
             overall = conn.execute(
                 """SELECT COUNT(*) as count,
                           AVG(slippage_pct) as avg_slippage,
                           MAX(slippage_pct) as worst_slippage,
                           SUM(ABS(slippage_pct) * shares * expected_price / 100) as total_cost
-                   FROM slippage_records WHERE timestamp >= ?""",
-                (cutoff,),
+                   FROM slippage_records WHERE user_id = ? AND timestamp >= ?""",
+                (user_id, cutoff),
             ).fetchone()
 
         return {
@@ -509,7 +608,7 @@ class Database:
             "overall": dict(overall) if overall else {},
         }
 
-    def get_ticker_slippage_avg(self, ticker: str, days: int = 30) -> float:
+    def get_ticker_slippage_avg(self, user_id: int, ticker: str, days: int = 30) -> float:
         """Get average slippage for a specific ticker. Used to warn before trading."""
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
@@ -517,15 +616,15 @@ class Database:
             row = conn.execute(
                 """SELECT AVG(slippage_pct) as avg_slip
                    FROM slippage_records
-                   WHERE ticker = ? AND timestamp >= ?""",
-                (ticker, cutoff),
+                   WHERE user_id = ? AND ticker = ? AND timestamp >= ?""",
+                (user_id, ticker, cutoff),
             ).fetchone()
         return float(row["avg_slip"]) if row and row["avg_slip"] is not None else 0.0
 
-    # ── Phase 8b: Edge Performance Tracking ────────────────────
+    # ── Edge Performance Tracking ────────────────────────────
 
     def save_edge_performance(
-        self, trade_id: int, ticker: str, edge_combo: str, edges_fired: int,
+        self, user_id: int, trade_id: int, ticker: str, edge_combo: str, edges_fired: int,
         fund_passed: bool, tech_passed: bool, sent_passed: bool,
         conviction: float, pnl: float, portfolio: str = "main",
     ) -> None:
@@ -533,16 +632,16 @@ class Database:
         with self._get_conn() as conn:
             conn.execute(
                 """INSERT INTO edge_performance
-                   (trade_id, ticker, timestamp, edge_combo, edges_fired,
+                   (user_id, trade_id, ticker, timestamp, edge_combo, edges_fired,
                     fund_passed, tech_passed, sent_passed, conviction, pnl, won, portfolio)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (trade_id, ticker, datetime.now().isoformat(), edge_combo, edges_fired,
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (user_id, trade_id, ticker, datetime.now().isoformat(), edge_combo, edges_fired,
                  1 if fund_passed else 0, 1 if tech_passed else 0,
                  1 if sent_passed else 0, conviction, pnl, 1 if pnl > 0 else 0, portfolio),
             )
 
-    def get_edge_combo_stats(self, min_trades: int = 5, days: int = 90) -> list[dict]:
-        """Get win rate and avg P&L by edge combo. Used to boost/penalize conviction."""
+    def get_edge_combo_stats(self, user_id: int, min_trades: int = 5, days: int = 90) -> list[dict]:
+        """Win rate and avg P&L by edge combo. Used to boost/penalize conviction."""
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         with self._get_conn() as conn:
@@ -554,24 +653,24 @@ class Database:
                           SUM(pnl) as total_pnl,
                           ROUND(CAST(SUM(won) AS REAL) / COUNT(*) * 100, 1) as win_rate_pct
                    FROM edge_performance
-                   WHERE timestamp >= ?
+                   WHERE user_id = ? AND timestamp >= ?
                    GROUP BY edge_combo
                    HAVING COUNT(*) >= ?
                    ORDER BY win_rate_pct DESC""",
-                (cutoff, min_trades),
+                (user_id, cutoff, min_trades),
             ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_edge_combo_win_rate(self, edge_combo: str, days: int = 90) -> float | None:
-        """Get win rate for a specific edge combo. Returns None if insufficient data."""
+    def get_edge_combo_win_rate(self, user_id: int, edge_combo: str, days: int = 90) -> float | None:
+        """Win rate for a specific edge combo. Returns None if insufficient data."""
         from datetime import timedelta
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         with self._get_conn() as conn:
             row = conn.execute(
                 """SELECT COUNT(*) as n, SUM(won) as w
                    FROM edge_performance
-                   WHERE edge_combo = ? AND timestamp >= ?""",
-                (edge_combo, cutoff),
+                   WHERE user_id = ? AND edge_combo = ? AND timestamp >= ?""",
+                (user_id, edge_combo, cutoff),
             ).fetchone()
         if row and row["n"] >= 5:
             return row["w"] / row["n"]
@@ -589,14 +688,17 @@ class Database:
             return obj.tolist()
         raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
-    def save_research(self, ticker: str, report: dict, portfolio: str = "main") -> int:
+    # ── Research / Analysis / Trade writes ────────────────────
+
+    def save_research(self, user_id: int, ticker: str, report: dict, portfolio: str = "main") -> int:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO research_reports
-                   (ticker, timestamp, news_impact_score, reddit_sentiment_score,
+                   (user_id, ticker, timestamp, news_impact_score, reddit_sentiment_score,
                     combined_catalyst_score, report_json, portfolio)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    user_id,
                     ticker,
                     datetime.now().isoformat(),
                     report.get("news_impact_score", 0),
@@ -608,14 +710,15 @@ class Database:
             )
             return cursor.lastrowid
 
-    def save_analysis(self, analysis: dict, portfolio: str = "main") -> int:
+    def save_analysis(self, user_id: int, analysis: dict, portfolio: str = "main") -> int:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO analysis_results
-                   (ticker, timestamp, action, conviction, position_size_pct,
+                   (user_id, ticker, timestamp, action, conviction, position_size_pct,
                     stop_loss_pct, take_profit_pct, reasoning, analysis_json, portfolio)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    user_id,
                     analysis["ticker"],
                     datetime.now().isoformat(),
                     analysis["action"],
@@ -630,14 +733,15 @@ class Database:
             )
             return cursor.lastrowid
 
-    def save_trade(self, trade: dict, portfolio: str = "main") -> int:
+    def save_trade(self, user_id: int, trade: dict, portfolio: str = "main") -> int:
         with self._get_conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO trades
-                   (ticker, timestamp, action, quantity, entry_price,
+                   (user_id, ticker, timestamp, action, quantity, entry_price,
                     stop_loss_price, take_profit_price, conviction, order_id, reasoning, portfolio)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
+                    user_id,
                     trade["ticker"],
                     datetime.now().isoformat(),
                     trade["action"],
@@ -653,34 +757,39 @@ class Database:
             )
             return cursor.lastrowid
 
-    def get_open_trades(self, portfolio: str | None = None) -> list[dict]:
+    # ── User-scoped reads ────────────────────────────────────
+
+    def get_open_trades(self, user_id: int, portfolio: str | None = None) -> list[dict]:
         with self._get_conn() as conn:
             if portfolio:
                 rows = conn.execute(
-                    "SELECT * FROM trades WHERE status = 'OPEN' AND portfolio = ?",
-                    (portfolio,),
+                    "SELECT * FROM trades WHERE user_id = ? AND status = 'OPEN' AND portfolio = ?",
+                    (user_id, portfolio),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM trades WHERE status = 'OPEN'"
+                    "SELECT * FROM trades WHERE user_id = ? AND status = 'OPEN'",
+                    (user_id,),
                 ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_today_pnl(self) -> dict:
+    def get_today_pnl(self, user_id: int) -> dict:
         today = datetime.now().strftime("%Y-%m-%d")
         with self._get_conn() as conn:
             row = conn.execute(
-                "SELECT * FROM daily_pnl WHERE date = ?", (today,)
+                "SELECT * FROM daily_pnl WHERE user_id = ? AND date = ?",
+                (user_id, today),
             ).fetchone()
             if row:
                 return dict(row)
             return {"date": today, "realized_pnl": 0, "trades_taken": 0}
 
-    def update_daily_pnl(self, pnl: float, won: bool) -> None:
+    def update_daily_pnl(self, user_id: int, pnl: float, won: bool) -> None:
         today = datetime.now().strftime("%Y-%m-%d")
         with self._get_conn() as conn:
             existing = conn.execute(
-                "SELECT * FROM daily_pnl WHERE date = ?", (today,)
+                "SELECT * FROM daily_pnl WHERE user_id = ? AND date = ?",
+                (user_id, today),
             ).fetchone()
             if existing:
                 conn.execute(
@@ -689,30 +798,31 @@ class Database:
                        trades_taken = trades_taken + 1,
                        trades_won = trades_won + ?,
                        trades_lost = trades_lost + ?
-                       WHERE date = ?""",
-                    (pnl, 1 if won else 0, 0 if won else 1, today),
+                       WHERE user_id = ? AND date = ?""",
+                    (pnl, 1 if won else 0, 0 if won else 1, user_id, today),
                 )
             else:
                 conn.execute(
-                    """INSERT INTO daily_pnl (date, realized_pnl, trades_taken, trades_won, trades_lost)
-                       VALUES (?, ?, 1, ?, ?)""",
-                    (today, pnl, 1 if won else 0, 0 if won else 1),
+                    """INSERT INTO daily_pnl (user_id, date, realized_pnl, trades_taken, trades_won, trades_lost)
+                       VALUES (?, ?, ?, 1, ?, ?)""",
+                    (user_id, today, pnl, 1 if won else 0, 0 if won else 1),
                 )
 
-    def get_recent_trades(self, limit: int = 50, portfolio: str | None = None) -> list[dict]:
+    def get_recent_trades(self, user_id: int, limit: int = 50, portfolio: str | None = None) -> list[dict]:
         with self._get_conn() as conn:
             if portfolio:
                 rows = conn.execute(
-                    "SELECT * FROM trades WHERE portfolio = ? ORDER BY timestamp DESC LIMIT ?",
-                    (portfolio, limit),
+                    "SELECT * FROM trades WHERE user_id = ? AND portfolio = ? ORDER BY timestamp DESC LIMIT ?",
+                    (user_id, portfolio, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?", (limit,)
+                    "SELECT * FROM trades WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?",
+                    (user_id, limit),
                 ).fetchall()
             return [dict(r) for r in rows]
 
-    def get_recent_analyses(self, limit: int = 20, unique: bool = True, portfolio: str | None = None) -> list[dict]:
+    def get_recent_analyses(self, user_id: int, limit: int = 20, unique: bool = True, portfolio: str | None = None) -> list[dict]:
         with self._get_conn() as conn:
             pf_clause = "AND portfolio = ?" if portfolio else ""
             pf_params: tuple = (portfolio,) if portfolio else ()
@@ -720,30 +830,32 @@ class Database:
                 rows = conn.execute(
                     f"""SELECT * FROM analysis_results
                        WHERE id IN (
-                           SELECT MAX(id) FROM analysis_results WHERE 1=1 {pf_clause} GROUP BY ticker
+                           SELECT MAX(id) FROM analysis_results WHERE user_id = ? {pf_clause} GROUP BY ticker
                        )
                        ORDER BY timestamp DESC LIMIT ?""",
-                    pf_params + (limit,),
+                    (user_id,) + pf_params + (limit,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    f"SELECT * FROM analysis_results WHERE 1=1 {pf_clause} ORDER BY timestamp DESC LIMIT ?",
-                    pf_params + (limit,),
+                    f"SELECT * FROM analysis_results WHERE user_id = ? {pf_clause} ORDER BY timestamp DESC LIMIT ?",
+                    (user_id,) + pf_params + (limit,),
                 ).fetchall()
             return [dict(r) for r in rows]
 
-    def was_recently_analyzed(self, ticker: str, minutes: int = 55) -> bool:
-        """Check if ticker was analyzed within the last N minutes."""
+    def was_recently_analyzed(self, user_id: int, ticker: str, minutes: int = 55) -> bool:
+        """Check if ticker was analyzed for this user within the last N minutes."""
         with self._get_conn() as conn:
             row = conn.execute(
                 """SELECT timestamp FROM analysis_results
-                   WHERE ticker = ? ORDER BY timestamp DESC LIMIT 1""",
-                (ticker,),
+                   WHERE user_id = ? AND ticker = ? ORDER BY timestamp DESC LIMIT 1""",
+                (user_id, ticker),
             ).fetchone()
             if not row:
                 return False
             last = datetime.fromisoformat(row["timestamp"])
             return (datetime.now() - last).total_seconds() < minutes * 60
+
+    # ── Alpaca request audit log (global) ────────────────────
 
     def save_request_id(
         self,
@@ -781,13 +893,13 @@ class Database:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    # ── Trade lifecycle updates (keyed by trade_id, user_id derived) ──
+
     def close_trade(
         self, trade_id: int, exit_price: float, pnl: float, exit_reason: str = ""
     ) -> None:
+        """Close a trade and record edge performance. user_id is read from the trade row."""
         # Both writes happen on the SAME connection to avoid self-deadlock.
-        # Nested connections here caused SQLITE_BUSY: outer conn held the write
-        # lock for the UPDATE, second conn from save_edge_performance blocked
-        # forever until busy_timeout expired.
         with self._get_conn() as conn:
             conn.execute(
                 """UPDATE trades SET status = 'CLOSED', exit_price = ?,
@@ -795,7 +907,6 @@ class Database:
                 (exit_price, datetime.now().isoformat(), pnl, exit_reason, trade_id),
             )
 
-            # Phase 8b: Record edge performance for learning
             trade = conn.execute(
                 "SELECT * FROM trades WHERE id = ?", (trade_id,)
             ).fetchone()
@@ -815,13 +926,12 @@ class Database:
                         combo_parts.append("S")
                     edge_combo = "+".join(combo_parts) if combo_parts else "none"
 
-                    # Inline the INSERT on the same conn — don't call save_edge_performance
                     conn.execute(
                         """INSERT INTO edge_performance
-                           (trade_id, ticker, timestamp, edge_combo, edges_fired,
+                           (user_id, trade_id, ticker, timestamp, edge_combo, edges_fired,
                             fund_passed, tech_passed, sent_passed, conviction, pnl, won, portfolio)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (trade_id, trade["ticker"], datetime.now().isoformat(), edge_combo,
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (trade["user_id"], trade_id, trade["ticker"], datetime.now().isoformat(), edge_combo,
                          trade["edges_fired"] or 0,
                          1 if fund else 0, 1 if tech else 0, 1 if sent else 0,
                          trade["conviction"] or 0, pnl, 1 if pnl > 0 else 0,
@@ -830,16 +940,15 @@ class Database:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-    def get_strategy_stats(self, portfolio: str = "main", days: int = 90) -> dict:
+    def get_strategy_stats(self, user_id: int, portfolio: str = "main", days: int = 90) -> dict:
         """Compute win rate and payoff ratio from closed trades for Kelly sizing."""
         with self._get_conn() as conn:
-            cutoff = datetime.now()
             from datetime import timedelta
-            cutoff = (cutoff - timedelta(days=days)).isoformat()
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
             rows = conn.execute(
                 """SELECT pnl FROM trades
-                   WHERE status = 'CLOSED' AND portfolio = ? AND timestamp >= ? AND pnl IS NOT NULL""",
-                (portfolio, cutoff),
+                   WHERE user_id = ? AND status = 'CLOSED' AND portfolio = ? AND timestamp >= ? AND pnl IS NOT NULL""",
+                (user_id, portfolio, cutoff),
             ).fetchall()
 
         if not rows:
@@ -865,10 +974,10 @@ class Database:
             "profit_factor": sum(wins) / abs(sum(losses)) if losses and sum(losses) != 0 else 0,
         }
 
-    def get_strategy_performance(self, portfolio: str = "main", days: int = 30) -> dict:
+    def get_strategy_performance(self, user_id: int, portfolio: str = "main", days: int = 30) -> dict:
         """Detailed performance for post-trade learning. Returns win rate trend."""
-        stats = self.get_strategy_stats(portfolio, days)
-        baseline = self.get_strategy_stats(portfolio, days * 3)
+        stats = self.get_strategy_stats(user_id, portfolio, days)
+        baseline = self.get_strategy_stats(user_id, portfolio, days * 3)
         stats["baseline_win_rate"] = baseline["win_rate"]
         stats["win_rate_delta"] = stats["win_rate"] - baseline["win_rate"] if baseline["trade_count"] >= 20 else 0
         return stats
@@ -891,6 +1000,7 @@ class Database:
             )
 
     def save_partial_exit(self, trade_id: int, quantity: int, exit_price: float, pnl: float, reason: str = "", order_id: str = "") -> int:
+        """Partial exit inherits user_id via trade_id FK — no direct scoping needed."""
         with self._get_conn() as conn:
             cursor = conn.execute(
                 """INSERT INTO partial_exits (trade_id, timestamp, quantity, exit_price, pnl, reason, order_id)
@@ -899,18 +1009,17 @@ class Database:
             )
             return cursor.lastrowid
 
-    def get_peak_equity(self, days: int = 30) -> float:
-        """Get peak equity from daily_pnl table over the last N days."""
+    def get_peak_equity(self, user_id: int, days: int = 30) -> float:
+        """Peak equity from this user's daily_pnl over the last N days."""
         with self._get_conn() as conn:
             from datetime import timedelta
             cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
             rows = conn.execute(
-                "SELECT realized_pnl FROM daily_pnl WHERE date >= ? ORDER BY date",
-                (cutoff,),
+                "SELECT realized_pnl FROM daily_pnl WHERE user_id = ? AND date >= ? ORDER BY date",
+                (user_id, cutoff),
             ).fetchall()
         if not rows:
             return 0
-        # Accumulate P&L to find peak
         cumulative = 0
         peak = 0
         for r in rows:

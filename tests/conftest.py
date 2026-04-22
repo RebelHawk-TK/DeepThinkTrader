@@ -50,7 +50,24 @@ def db(tmp_path):
 
 
 @pytest.fixture
-def risk_manager(db):
+def test_user_id(db):
+    """Seed a test user and return its id.
+
+    Post-0004 migration, every tenant-owned row needs a user_id FK, so tests
+    that write trades / analyses / reflections need a users row to reference.
+    """
+    with db._get_conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO users (email, role, enabled) VALUES (?, 'admin', 1)",
+            ("test@example.com",),
+        )
+        return cur.lastrowid
+
+
+@pytest.fixture
+def risk_manager(db, test_user_id):
     from utils.risk_manager import RiskManager
 
-    return RiskManager(db=db)
+    return RiskManager(
+        user_id=test_user_id, api_key="test-key", secret_key="test-secret", db=db,
+    )

@@ -53,18 +53,34 @@ class SlippageFit:
         return max(base, 0.0)
 
 
-def fit_slippage(db: Database | None = None, recency_days: int = RECENCY_DAYS) -> SlippageFit:
-    """Fit a SlippageFit from the DB's `slippage_records` table."""
+def fit_slippage(
+    db: Database | None = None,
+    user_id: int | None = None,
+    recency_days: int = RECENCY_DAYS,
+) -> SlippageFit:
+    """Fit a SlippageFit from the DB's `slippage_records` table.
+
+    When ``user_id`` is given, only that user's fills are fit; otherwise all
+    fills are considered (kept as a convenience for tests and analytics).
+    """
     db = db or Database()
     cutoff = (datetime.now() - timedelta(days=recency_days)).isoformat()
 
     with db._get_conn() as conn:
-        rows = conn.execute(
-            """SELECT ticker, side, shares, slippage_pct
-               FROM slippage_records
-               WHERE timestamp >= ?""",
-            (cutoff,),
-        ).fetchall()
+        if user_id is not None:
+            rows = conn.execute(
+                """SELECT ticker, side, shares, slippage_pct
+                   FROM slippage_records
+                   WHERE user_id = ? AND timestamp >= ?""",
+                (user_id, cutoff),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT ticker, side, shares, slippage_pct
+                   FROM slippage_records
+                   WHERE timestamp >= ?""",
+                (cutoff,),
+            ).fetchall()
 
     # Group by ticker + side. slippage_pct is signed; we care about cost, so
     # flip sign for sells (a sell filled below expected is a cost).

@@ -9,71 +9,69 @@ from agents.reflection_writer import ReflectionWriter, format_reflections_for_pr
 # ─────────────────────────── DB layer ────────────────────────────────────
 
 
-def test_save_and_retrieve_reflection(db):
-    # Need a real trade for FK integrity.
-    tid = db.save_trade({
+def test_save_and_retrieve_reflection(db, test_user_id):
+    tid = db.save_trade(test_user_id, {
         "ticker": "NVDA", "action": "BUY", "quantity": 10, "entry_price": 900.0,
         "stop_loss_price": 855.0, "take_profit_price": 990.0, "conviction": 8.0,
         "order_id": "ord1",
     })
     rid = db.save_reflection(
-        trade_id=tid, ticker="NVDA", thesis="momentum + earnings beat",
+        user_id=test_user_id, trade_id=tid, ticker="NVDA",
+        thesis="momentum + earnings beat",
         outcome_pnl=150.0, lesson="RSI >75 on entry was a warning; wait for pullback next time.",
     )
     assert rid > 0
 
-    rows = db.get_reflections(ticker="NVDA", limit=5)
+    rows = db.get_reflections(test_user_id, ticker="NVDA", limit=5)
     assert len(rows) == 1
     assert rows[0]["outcome_label"] == "win"
     assert rows[0]["lesson"].startswith("RSI >75")
 
 
-def test_retrieve_scoped_to_ticker_first(db):
-    # Two tickers, both with reflections. Asking for NVDA should surface the
-    # NVDA one first, then backfill with global recent (here: the AAPL one).
+def test_retrieve_scoped_to_ticker_first(db, test_user_id):
     for t in ("NVDA", "AAPL"):
-        tid = db.save_trade({
+        tid = db.save_trade(test_user_id, {
             "ticker": t, "action": "BUY", "quantity": 10, "entry_price": 100.0,
             "stop_loss_price": 95.0, "take_profit_price": 110.0, "conviction": 7.0,
             "order_id": f"o-{t}",
         })
         db.save_reflection(
-            trade_id=tid, ticker=t, thesis="test",
+            user_id=test_user_id, trade_id=tid, ticker=t, thesis="test",
             outcome_pnl=10.0 if t == "NVDA" else -5.0,
             lesson=f"{t} lesson",
         )
 
-    rows = db.get_reflections(ticker="NVDA", limit=5)
+    rows = db.get_reflections(test_user_id, ticker="NVDA", limit=5)
     assert len(rows) == 2
     assert rows[0]["ticker"] == "NVDA"  # scoped first
     assert rows[1]["ticker"] == "AAPL"  # global backfill
 
 
-def test_retrieve_limit_caps_results(db):
-    tid = db.save_trade({
+def test_retrieve_limit_caps_results(db, test_user_id):
+    tid = db.save_trade(test_user_id, {
         "ticker": "NVDA", "action": "BUY", "quantity": 10, "entry_price": 100.0,
         "stop_loss_price": 95.0, "take_profit_price": 110.0, "conviction": 7.0,
         "order_id": "o1",
     })
     for i in range(10):
-        db.save_reflection(tid, "NVDA", "t", 1.0, f"lesson {i}")
-    assert len(db.get_reflections(ticker="NVDA", limit=3)) == 3
+        db.save_reflection(test_user_id, tid, "NVDA", "t", 1.0, f"lesson {i}")
+    assert len(db.get_reflections(test_user_id, ticker="NVDA", limit=3)) == 3
 
 
 # ─────────────────────────── Writer ──────────────────────────────────────
 
 
-def test_writer_saves_via_claude_when_available(db):
+def test_writer_saves_via_claude_when_available(db, test_user_id):
     writer = ReflectionWriter.__new__(ReflectionWriter)
     writer.db = db
+    writer.user_id = test_user_id
     writer.config = MagicMock(CLAUDE_MODEL="claude-haiku-4-5")
-    # Stub the Claude client.
     fake_msg = MagicMock()
     fake_msg.content = [MagicMock(text="Entering at RSI 78 is the mistake to avoid.")]
     writer._client = MagicMock()
     writer._client.messages.create.return_value = fake_msg
 
-    tid = db.save_trade({
+    tid = db.save_trade(test_user_id, {
         "ticker": "NVDA", "action": "BUY", "quantity": 10, "entry_price": 900.0,
         "stop_loss_price": 855.0, "take_profit_price": 990.0, "conviction": 8.0,
         "order_id": "ord-w",
@@ -84,22 +82,22 @@ def test_writer_saves_via_claude_when_available(db):
         outcome_pnl=-200.0, outcome_context="stop_loss after earnings miss",
     )
     assert rid is not None
-    rows = db.get_reflections(ticker="NVDA", limit=1)
+    rows = db.get_reflections(test_user_id, ticker="NVDA", limit=1)
     assert "RSI 78" in rows[0]["lesson"]
 
-    # Verify cache_control was passed through.
     call = writer._client.messages.create.call_args
     system = call.kwargs["system"]
     assert system[0]["cache_control"] == {"type": "ephemeral"}
 
 
-def test_writer_falls_back_when_client_missing(db):
+def test_writer_falls_back_when_client_missing(db, test_user_id):
     writer = ReflectionWriter.__new__(ReflectionWriter)
     writer.db = db
+    writer.user_id = test_user_id
     writer.config = MagicMock()
-    writer._client = None  # API key missing
+    writer._client = None
 
-    tid = db.save_trade({
+    tid = db.save_trade(test_user_id, {
         "ticker": "NVDA", "action": "BUY", "quantity": 10, "entry_price": 100.0,
         "stop_loss_price": 95.0, "take_profit_price": 110.0, "conviction": 7.0,
         "order_id": "o-f",
@@ -109,24 +107,24 @@ def test_writer_falls_back_when_client_missing(db):
         outcome_pnl=50.0, outcome_context="take_profit",
     )
     assert rid is not None
-    rows = db.get_reflections(ticker="NVDA", limit=1)
+    rows = db.get_reflections(test_user_id, ticker="NVDA", limit=1)
     assert "NVDA win" in rows[0]["lesson"]
     assert "take_profit" in rows[0]["lesson"]
 
 
-def test_writer_swallows_claude_errors(db):
+def test_writer_swallows_claude_errors(db, test_user_id):
     writer = ReflectionWriter.__new__(ReflectionWriter)
     writer.db = db
+    writer.user_id = test_user_id
     writer.config = MagicMock()
     writer._client = MagicMock()
     writer._client.messages.create.side_effect = RuntimeError("API down")
 
-    tid = db.save_trade({
+    tid = db.save_trade(test_user_id, {
         "ticker": "NVDA", "action": "BUY", "quantity": 10, "entry_price": 100.0,
         "stop_loss_price": 95.0, "take_profit_price": 110.0, "conviction": 7.0,
         "order_id": "o-e",
     })
-    # Even if Claude raises, fallback must produce a lesson and save it.
     rid = writer.on_trade_closed(tid, "NVDA", "thesis", 10.0, "ctx")
     assert rid is not None
 

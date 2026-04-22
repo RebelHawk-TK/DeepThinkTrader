@@ -6,6 +6,7 @@ import logging
 
 from config import Config
 from utils.claude_analyst import ClaudeAnalyst
+from utils.cycle_cache import claude_cache, debate_cache
 from utils.database import Database
 from utils.yahoo_fundamentals import YahooFundamentals
 
@@ -13,9 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class DeepThinkAgent:
-    def __init__(self, db: Database | None = None):
+    def __init__(self, user_id: int, db: Database | None = None):
+        """Per-user analysis agent. Analysis rows inherit user_id."""
         self.config = Config()
         self.db = db or Database()
+        self.user_id = user_id
         self.yahoo = YahooFundamentals()
         self.claude = ClaudeAnalyst()
 
@@ -471,7 +474,7 @@ class DeepThinkAgent:
 
         if sector:
             from utils.risk_manager import RiskManager
-            rm = RiskManager(self.db)
+            rm = RiskManager(user_id=self.user_id, db=self.db)
             sector_trend = rm.check_sector_trend(sector)
             if not sector_trend["uptrend"]:
                 conviction = max(1, conviction - 0.5)
@@ -487,7 +490,7 @@ class DeepThinkAgent:
                 combo_parts.append(e["label"][0])  # F, T, or S
         edge_combo = "+".join(combo_parts) if combo_parts else "none"
 
-        historical_wr = self.db.get_edge_combo_win_rate(edge_combo)
+        historical_wr = self.db.get_edge_combo_win_rate(self.user_id, edge_combo)
         if historical_wr is not None:
             if historical_wr > 0.65:
                 bonus = round((historical_wr - 0.5) * 3, 1)  # up to +1.5
@@ -519,44 +522,60 @@ class DeepThinkAgent:
             edge_reason = "Conviction below threshold"
 
         # Step 8a: Bull/Bear debate — adversarial analysis before Claude review
+        # Skip on HOLD: rules already said "do nothing", debate would only
+        # produce a SELL-override path we don't want to pay tokens for.
+        # Cache by ticker so multi-user cycles reuse one API call.
         debate_result = None
-        if self.debate_engine:
-            try:
-                pre_debate = {
+        if self.debate_engine and action != "HOLD":
+            debate_result = debate_cache().get(ticker)
+            if debate_result is not None:
+                logger.info(f"Debate cache HIT for {ticker} (reused across users)")
+            else:
+                try:
+                    pre_debate = {
+                        "action": action, "conviction": conviction,
+                        "bullish_factors": bullish, "bearish_factors": bearish,
+                        "edge_details": edge_details,
+                    }
+                    debate_result = self.debate_engine.run_debate(
+                        report=report,
+                        rule_analysis=pre_debate,
+                        rounds=getattr(self.config, "DEBATE_ROUNDS", 2),
+                    )
+                    debate_cache().set(ticker, debate_result)
+                except Exception as e:
+                    logger.error(f"Debate failed for {ticker}: {e}")
+
+            if debate_result:
+                debate_conv = debate_result["conviction"]
+                # Blend: 60% rule-based, 40% debate
+                conviction = round(conviction * 0.6 + debate_conv * 0.4, 1)
+                conviction = max(1.0, min(10.0, conviction))
+                # Override action if judge disagrees strongly
+                if debate_result["decision"] != action and debate_conv >= 7.0:
+                    logger.warning(
+                        f"DEBATE OVERRIDE for {ticker}: {action} → {debate_result['decision']} "
+                        f"(judge conviction {debate_conv}, winner: {debate_result['winning_side']})"
+                    )
+                    action = debate_result["decision"]
+
+        # Step 8b: Claude qualitative analysis — final review after debate
+        # Cache by ticker so multi-user cycles reuse one API call.
+        claude_analysis = {}
+        if self.claude.enabled:
+            cached_claude = claude_cache().get(ticker)
+            if cached_claude is not None:
+                claude_analysis = cached_claude
+                logger.info(f"Claude cache HIT for {ticker} (reused across users)")
+            else:
+                pre_claude_analysis = {
                     "action": action, "conviction": conviction,
                     "bullish_factors": bullish, "bearish_factors": bearish,
                     "edge_details": edge_details,
+                    "debate": debate_result,
                 }
-                debate_result = self.debate_engine.run_debate(
-                    report=report,
-                    rule_analysis=pre_debate,
-                    rounds=getattr(self.config, "DEBATE_ROUNDS", 2),
-                )
-                if debate_result:
-                    debate_conv = debate_result["conviction"]
-                    # Blend: 60% rule-based, 40% debate
-                    conviction = round(conviction * 0.6 + debate_conv * 0.4, 1)
-                    conviction = max(1.0, min(10.0, conviction))
-                    # Override action if judge disagrees strongly
-                    if debate_result["decision"] != action and debate_conv >= 7.0:
-                        logger.warning(
-                            f"DEBATE OVERRIDE for {ticker}: {action} → {debate_result['decision']} "
-                            f"(judge conviction {debate_conv}, winner: {debate_result['winning_side']})"
-                        )
-                        action = debate_result["decision"]
-            except Exception as e:
-                logger.error(f"Debate failed for {ticker}: {e}")
-
-        # Step 8b: Claude qualitative analysis — final review after debate
-        claude_analysis = {}
-        if self.claude.enabled:
-            pre_claude_analysis = {
-                "action": action, "conviction": conviction,
-                "bullish_factors": bullish, "bearish_factors": bearish,
-                "edge_details": edge_details,
-                "debate": debate_result,
-            }
-            claude_analysis = self.claude.analyze_trade(report, pre_claude_analysis)
+                claude_analysis = self.claude.analyze_trade(report, pre_claude_analysis)
+                claude_cache().set(ticker, claude_analysis)
 
             # Apply conviction adjustment (scaled by Claude's confidence)
             adj = claude_analysis.get("conviction_adjustment", 0)
@@ -624,7 +643,7 @@ class DeepThinkAgent:
             "claude_analysis": claude_analysis if claude_analysis else None,
         }
 
-        self.db.save_analysis(analysis, portfolio=portfolio)
+        self.db.save_analysis(self.user_id, analysis, portfolio=portfolio)
         logger.info(f"DeepThink result for {ticker} [{portfolio}]: {action} (conviction: {conviction})")
 
         return analysis

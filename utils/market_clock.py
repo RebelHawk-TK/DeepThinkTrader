@@ -25,16 +25,20 @@ UTC = ZoneInfo("UTC")
 
 
 class MarketClock:
-    """Real-time market clock with Alpaca calendar validation."""
+    """Real-time market clock with Alpaca calendar validation.
 
-    def __init__(self):
-        self.config = Config()
+    Market hours are global, not per-user, but Alpaca's /v2/clock endpoint
+    requires authentication. Callers supply any valid Alpaca keys
+    (typically the first active user's keys — see get_market_clock below).
+    """
+
+    def __init__(self, api_key: str, secret_key: str):
         self._session = http_requests.Session()
         self._session.headers.update({
-            "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-            "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+            "APCA-API-KEY-ID": api_key,
+            "APCA-API-SECRET-KEY": secret_key,
         })
-        self._base_url = self.config.ALPACA_BASE_URL
+        self._base_url = Config.ALPACA_BASE_URL
 
         # Cache: avoid hitting Alpaca API every 30 seconds
         self._cached_clock: dict | None = None
@@ -237,13 +241,20 @@ class MarketClock:
             )
 
 
-# Module-level singleton for easy import
+# Module-level singleton for easy import. The singleton is keyed by
+# credential fingerprint so a second caller with different keys can reuse
+# the same underlying instance if compatible.
 _clock: MarketClock | None = None
 
 
-def get_market_clock() -> MarketClock:
-    """Get or create the singleton MarketClock instance."""
+def get_market_clock(api_key: str, secret_key: str) -> MarketClock:
+    """Get or create a MarketClock for these credentials.
+
+    Market data is cross-user but authenticated. First caller sets the
+    singleton; subsequent callers reuse it regardless of whose keys made
+    the initial call (the API returns the same result either way).
+    """
     global _clock
     if _clock is None:
-        _clock = MarketClock()
+        _clock = MarketClock(api_key, secret_key)
     return _clock

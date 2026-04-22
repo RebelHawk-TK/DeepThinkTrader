@@ -32,9 +32,11 @@ your behavior. Respond with the lesson text only — no JSON, no quotes."""
 
 
 class ReflectionWriter:
-    def __init__(self, db: Database | None = None, config: Config | None = None) -> None:
+    def __init__(self, user_id: int, db: Database | None = None, config: Config | None = None) -> None:
+        """Per-user reflection writer. Lessons are written scoped to user_id."""
         self.db = db or Database()
         self.config = config or Config()
+        self.user_id = user_id
         self._client = self._build_client()
 
     def _build_client(self):
@@ -64,7 +66,7 @@ class ReflectionWriter:
             return None
         try:
             rid = self.db.save_reflection(
-                trade_id=trade_id, ticker=ticker, thesis=thesis,
+                user_id=self.user_id, trade_id=trade_id, ticker=ticker, thesis=thesis,
                 outcome_pnl=outcome_pnl, lesson=lesson,
             )
             logger.info(f"Reflection saved for {ticker} trade {trade_id} (id={rid})")

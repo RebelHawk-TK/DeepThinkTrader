@@ -28,11 +28,21 @@ logger = logging.getLogger(__name__)
 
 
 class ResearchAgent:
-    def __init__(self, db: Database | None = None):
+    def __init__(
+        self,
+        user_id: int,
+        api_key: str,
+        secret_key: str,
+        db: Database | None = None,
+    ):
+        """Per-user research agent. Research reports written here inherit
+        user_id so each user's historical research is isolated.
+        """
         self.config = Config()
         self.db = db or Database()
+        self.user_id = user_id
         self.rate_limiter = RateLimiter()
-        self.alpaca_data = AlpacaMarketData(self.db)
+        self.alpaca_data = AlpacaMarketData(api_key=api_key, secret_key=secret_key, db=self.db)
         self.twelve_data = None  # Disabled — rate limits block 15min cycles. yfinance covers technicals.
         self.yahoo_fundamentals = YahooFundamentals()
         self.sa_rss = SeekingAlphaRSS()
@@ -77,7 +87,7 @@ class ResearchAgent:
             logger.info("Reddit (PRAW) initialized")
         else:
             self.reddit = None
-            logger.info("Reddit credentials not set — skipping sentiment analysis")
+            logger.debug("Reddit credentials not set — skipping sentiment analysis")
 
     def fetch_news(self, ticker: str, hours: int = 24) -> list[dict]:
         """Fetch recent news articles for a ticker from NewsAPI."""
@@ -721,7 +731,7 @@ class ResearchAgent:
         }
 
         # Save to database
-        self.db.save_research(ticker, report)
+        self.db.save_research(self.user_id, ticker, report)
         logger.info(f"Research report saved for {ticker} (catalyst: {combined})")
 
         # Cache report for 15min cycle reuse

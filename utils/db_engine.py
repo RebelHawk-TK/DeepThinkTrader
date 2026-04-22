@@ -211,8 +211,19 @@ class _PGConnProxy:
         # lastrowid (matches sqlite3.Cursor behavior). Skip if the query already
         # has RETURNING, or if the insert target lacks an 'id' column.
         is_insert = kw == "INSERT"
+        # Tables whose PK is something other than `id` — appending RETURNING id
+        # would fail with "column id does not exist". Extend this set when new
+        # id-less tables are added.
+        _TABLES_WITHOUT_ID = {"user_secrets"}
+        _target = ""
+        if is_insert:
+            import re as _re
+            m = _re.search(r"INSERT\s+INTO\s+([A-Za-z_][A-Za-z0-9_]*)", pg_sql, _re.IGNORECASE)
+            if m:
+                _target = m.group(1).lower()
         want_returning = (
             is_insert
+            and _target not in _TABLES_WITHOUT_ID
             and "RETURNING" not in pg_sql.upper()
             and "DO NOTHING" not in pg_sql.upper()
             and "DO UPDATE" not in pg_sql.upper()

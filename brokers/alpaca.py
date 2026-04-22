@@ -15,14 +15,14 @@ from config import Config
 
 
 class AlpacaBroker(IBroker):
-    def __init__(self, config: Config | None = None) -> None:
-        self.config = config or Config()
+    def __init__(self, api_key: str, secret_key: str) -> None:
+        """Broker bound to one Alpaca account. Caller supplies per-user keys."""
         self._session = requests.Session()
         self._session.headers.update({
-            "APCA-API-KEY-ID": self.config.ALPACA_API_KEY,
-            "APCA-API-SECRET-KEY": self.config.ALPACA_SECRET_KEY,
+            "APCA-API-KEY-ID": api_key,
+            "APCA-API-SECRET-KEY": secret_key,
         })
-        self._trading_base = self.config.ALPACA_BASE_URL
+        self._trading_base = Config.ALPACA_BASE_URL
         self._data_base = "https://data.alpaca.markets"
         self._timeout = (5, 30)  # (connect, read)
 

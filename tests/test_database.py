@@ -2,6 +2,9 @@
 
 Focus on round-trips (save → load → fields match) and the invariants
 dashboard and agents rely on.
+
+After migration 0004 every tenant-owned row carries a user_id; all tests
+use the `test_user_id` fixture (seeded users row) as the owning tenant.
 """
 from __future__ import annotations
 
@@ -9,14 +12,14 @@ from __future__ import annotations
 # ─────────────────────────── Basic round-trips ────────────────────────────
 
 
-def test_save_and_get_open_trade(db):
-    tid = db.save_trade({
+def test_save_and_get_open_trade(db, test_user_id):
+    tid = db.save_trade(test_user_id, {
         "ticker": "NVDA", "action": "BUY", "quantity": 5,
         "entry_price": 900.0, "stop_loss_price": 855.0,
         "take_profit_price": 945.0, "conviction": 8.5, "order_id": "ord-1",
     })
     assert tid > 0
-    opens = db.get_open_trades()
+    opens = db.get_open_trades(test_user_id)
     assert len(opens) == 1
     t = opens[0]
     assert t["ticker"] == "NVDA"
@@ -26,27 +29,27 @@ def test_save_and_get_open_trade(db):
     assert t["portfolio"] == "main"
 
 
-def test_save_trade_with_portfolio(db):
-    db.save_trade({
+def test_save_trade_with_portfolio(db, test_user_id):
+    db.save_trade(test_user_id, {
         "ticker": "XYZ", "action": "BUY", "quantity": 100,
         "entry_price": 3.0, "stop_loss_price": 2.85,
         "take_profit_price": 3.30, "conviction": 7.0, "order_id": "p1",
     }, portfolio="penny")
-    penny = db.get_open_trades(portfolio="penny")
-    main = db.get_open_trades(portfolio="main")
+    penny = db.get_open_trades(test_user_id, portfolio="penny")
+    main = db.get_open_trades(test_user_id, portfolio="main")
     assert len(penny) == 1 and penny[0]["ticker"] == "XYZ"
     assert len(main) == 0
 
 
-def test_close_trade_records_exit(db):
-    tid = db.save_trade({
+def test_close_trade_records_exit(db, test_user_id):
+    tid = db.save_trade(test_user_id, {
         "ticker": "AAPL", "action": "BUY", "quantity": 10,
         "entry_price": 200.0, "stop_loss_price": 190.0,
         "take_profit_price": 220.0, "conviction": 7.5, "order_id": "ord-2",
     })
     db.close_trade(trade_id=tid, exit_price=215.0, pnl=150.0, exit_reason="take_profit")
-    assert db.get_open_trades() == []
-    recent = db.get_recent_trades(limit=10)
+    assert db.get_open_trades(test_user_id) == []
+    recent = db.get_recent_trades(test_user_id, limit=10)
     assert len(recent) == 1
     t = recent[0]
     assert t["status"] == "CLOSED"
@@ -55,21 +58,21 @@ def test_close_trade_records_exit(db):
     assert t["exit_reason"] == "take_profit"
 
 
-def test_save_and_get_analysis(db):
-    aid = db.save_analysis({
+def test_save_and_get_analysis(db, test_user_id):
+    aid = db.save_analysis(test_user_id, {
         "ticker": "TSLA", "action": "BUY", "conviction": 8.0,
         "position_size_pct": 2.0, "stop_loss_pct": 4.0,
         "take_profit_pct": 8.0, "reasoning": "test",
         "analysis_json": "{}",
     })
     assert aid > 0
-    analyses = db.get_recent_analyses(limit=5, unique=False)
+    analyses = db.get_recent_analyses(test_user_id, limit=5, unique=False)
     assert len(analyses) == 1
     assert analyses[0]["ticker"] == "TSLA"
 
 
-def test_save_and_get_research(db):
-    rid = db.save_research(ticker="MSFT", report={
+def test_save_and_get_research(db, test_user_id):
+    rid = db.save_research(test_user_id, ticker="MSFT", report={
         "news_impact_score": 0.5,
         "reddit_sentiment_score": 0.2,
         "combined_catalyst_score": 0.4,
@@ -81,10 +84,10 @@ def test_save_and_get_research(db):
 # ─────────────────────────── Daily P&L tracking ───────────────────────────
 
 
-def test_daily_pnl_accumulates(db):
-    db.update_daily_pnl(100.0, won=True)
-    db.update_daily_pnl(-50.0, won=False)
-    today = db.get_today_pnl()
+def test_daily_pnl_accumulates(db, test_user_id):
+    db.update_daily_pnl(test_user_id, 100.0, won=True)
+    db.update_daily_pnl(test_user_id, -50.0, won=False)
+    today = db.get_today_pnl(test_user_id)
     assert today["realized_pnl"] == 50.0
     assert today["trades_taken"] == 2
 
@@ -93,8 +96,7 @@ def test_daily_pnl_accumulates(db):
 
 
 def test_save_atr_and_median(db):
-    """save_atr uses today's date with INSERT OR REPLACE, so we insert manually
-    across dates to avoid the yfinance seeding fallback."""
+    """ATR history is global (not user-scoped) — ticker-level market data."""
     import sqlite3
     from datetime import date, timedelta
     with sqlite3.connect(db.db_path) as conn:
@@ -127,73 +129,68 @@ def test_save_and_get_request_ids(db):
 # ─────────────────────────── Slippage tracking ─────────────────────────────
 
 
-def test_slippage_save_and_analytics(db):
+def test_slippage_save_and_analytics(db, test_user_id):
     db.save_slippage(
-        ticker="NVDA", expected_price=100.0, filled_price=100.25,
+        test_user_id, ticker="NVDA", expected_price=100.0, filled_price=100.25,
         shares=10, side="buy", order_type="market",
     )
     db.save_slippage(
-        ticker="NVDA", expected_price=100.0, filled_price=99.95,
+        test_user_id, ticker="NVDA", expected_price=100.0, filled_price=99.95,
         shares=10, side="sell", order_type="market",
     )
-    stats = db.get_slippage_analytics(days=30)
-    # Signature of the analytics dict varies; the key invariant is that it
-    # returns something non-empty after two saved records.
+    stats = db.get_slippage_analytics(test_user_id, days=30)
     assert stats
-    avg = db.get_ticker_slippage_avg("NVDA", days=30)
+    avg = db.get_ticker_slippage_avg(test_user_id, "NVDA", days=30)
     assert avg is not None
 
 
 # ─────────────────────────── Edge performance ──────────────────────────────
 
 
-def test_edge_combo_win_rate_learns(db):
+def test_edge_combo_win_rate_learns(db, test_user_id):
     for i, pnl in enumerate([50.0, 75.0, 60.0, -30.0, 20.0, -10.0]):
-        tid = db.save_trade({
+        tid = db.save_trade(test_user_id, {
             "ticker": "AAPL", "action": "BUY", "quantity": 10,
             "entry_price": 100.0, "stop_loss_price": 95.0,
             "take_profit_price": 110.0, "conviction": 8.0,
             "order_id": f"ord-ep-{i}",
         })
         db.save_edge_performance(
-            trade_id=tid, ticker="AAPL",
+            test_user_id, trade_id=tid, ticker="AAPL",
             edge_combo="FUNDAMENTAL|TECHNICAL", edges_fired=2,
             fund_passed=True, tech_passed=True, sent_passed=False,
             conviction=8.0, pnl=pnl,
         )
-    wr = db.get_edge_combo_win_rate("FUNDAMENTAL|TECHNICAL", days=365)
+    wr = db.get_edge_combo_win_rate(test_user_id, "FUNDAMENTAL|TECHNICAL", days=365)
     assert wr is None or (0.0 <= wr <= 1.0)
-    stats = db.get_edge_combo_stats(min_trades=3, days=365)
+    stats = db.get_edge_combo_stats(test_user_id, min_trades=3, days=365)
     assert any(s["edge_combo"] == "FUNDAMENTAL|TECHNICAL" for s in stats)
 
 
 # ─────────────────────────── Strategy stats ────────────────────────────────
 
 
-def test_strategy_stats_requires_closed_trades(db):
-    # No trades yet → zero stats.
-    stats = db.get_strategy_stats(portfolio="main")
+def test_strategy_stats_requires_closed_trades(db, test_user_id):
+    stats = db.get_strategy_stats(test_user_id, portfolio="main")
     assert stats["trade_count"] == 0
 
 
-def test_strategy_stats_with_closed_trades(db):
-    # Two wins, one loss.
+def test_strategy_stats_with_closed_trades(db, test_user_id):
     for i, (px, exit_px, pnl) in enumerate([
         (100.0, 110.0, 100.0),
         (50.0, 55.0, 50.0),
         (200.0, 180.0, -200.0),
     ]):
-        tid = db.save_trade({
+        tid = db.save_trade(test_user_id, {
             "ticker": f"T{i}", "action": "BUY", "quantity": 10,
             "entry_price": px, "stop_loss_price": px * 0.95,
             "take_profit_price": px * 1.10, "conviction": 7.0,
             "order_id": f"ord-{i}",
         })
         db.close_trade(tid, exit_price=exit_px, pnl=pnl, exit_reason="test")
-    stats = db.get_strategy_stats(portfolio="main", days=365)
+    stats = db.get_strategy_stats(test_user_id, portfolio="main", days=365)
     assert stats["trade_count"] == 3
     assert 0.0 <= stats["win_rate"] <= 1.0
-    # Expectancy = avg per-trade P&L = (100+50-200)/3 = -16.67
     assert "expectancy" in stats
 
 

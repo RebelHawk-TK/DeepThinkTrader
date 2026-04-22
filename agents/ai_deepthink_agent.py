@@ -216,13 +216,16 @@ class AIDeepThinkAgent:
     # How many past-trade lessons to retrieve and inject per analysis.
     REFLECTION_RETRIEVAL_LIMIT = 5
 
-    def __init__(self, db: Database | None = None):
+    def __init__(self, user_id: int, db: Database | None = None):
+        """Per-user Claude-backed analysis agent. Analyses and reflections
+        retrieved are scoped to user_id."""
         self.config = Config()
         self.db = db or Database()
+        self.user_id = user_id
         self.client = anthropic.Anthropic(api_key=self.config.ANTHROPIC_API_KEY)
         # Import fallback
         from agents.deepthink_agent import DeepThinkAgent
-        self.fallback = DeepThinkAgent(self.db)
+        self.fallback = DeepThinkAgent(user_id=user_id, db=self.db)
 
     def _build_reflection_context(self, ticker: str) -> str:
         """Retrieve recent lessons and format them for the prompt.
@@ -232,7 +235,7 @@ class AIDeepThinkAgent:
         """
         try:
             from agents.reflection_writer import format_reflections_for_prompt
-            rows = self.db.get_reflections(ticker=ticker, limit=self.REFLECTION_RETRIEVAL_LIMIT)
+            rows = self.db.get_reflections(self.user_id, ticker=ticker, limit=self.REFLECTION_RETRIEVAL_LIMIT)
             return format_reflections_for_prompt(rows)
         except Exception as e:
             logger.warning(f"Reflection retrieval failed for {ticker}: {e}")
@@ -463,7 +466,7 @@ class AIDeepThinkAgent:
             analysis["current_price"] = report.get("technicals", {}).get("current_price", 0)
 
             # Save to database
-            self.db.save_analysis(analysis)
+            self.db.save_analysis(self.user_id, analysis)
 
             logger.info(
                 f"AI DeepThink result for {ticker}: {analysis['action']} "

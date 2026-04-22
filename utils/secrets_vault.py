@@ -121,34 +121,15 @@ def delete_alpaca_keys(user_id: int) -> None:
     logger.info("alpaca keys deleted for user_id=%s", user_id)
 
 
-def bootstrap_active_user_keys() -> bool:
-    """If ACTIVE_USER_EMAIL is set and has DB keys, override Config with them.
-
-    Bridge between single-user env-based config and full multi-tenant iteration
-    (Phase C). Returns True if Config was overridden.
+def user_id_for_email(email: str) -> int | None:
+    """Resolve a user row id by email. Convenience for dashboard code paths
+    that only have the signed-in user's email from IAP headers.
     """
-    email = os.getenv("ACTIVE_USER_EMAIL", "").strip().lower()
-    if not email:
-        return False
-
     from utils.database import Database
 
     db = Database()
     with db._get_conn() as conn:
-        row = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
-    if not row:
-        logger.info("bootstrap: no user row for %s; falling back to env keys", email)
-        return False
-
-    keys = get_alpaca_keys(row["id"])
-    if not keys:
-        logger.info("bootstrap: no user_secrets for %s; falling back to env keys", email)
-        return False
-
-    key_id, secret = keys
-    from config import Config
-
-    Config.ALPACA_API_KEY = key_id
-    Config.ALPACA_SECRET_KEY = secret
-    logger.info("bootstrap: using DB keys for %s (tail=…%s)", email, key_id[-4:])
-    return True
+        row = conn.execute(
+            "SELECT id FROM users WHERE email = ?", (email.strip().lower(),)
+        ).fetchone()
+    return row["id"] if row else None
