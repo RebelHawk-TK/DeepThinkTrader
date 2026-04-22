@@ -2,9 +2,23 @@
 free aggregator didn't turn up enough coverage."""
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from agents.research_agent import ResearchAgent
+from utils.news_feeds.news_models import NewsArticle, NewsSource
+
+
+def _fake_article(ticker: str, idx: int, sentiment: float = 0.1) -> NewsArticle:
+    """NewsAggregator returns NewsArticle dataclasses; tests must match."""
+    return NewsArticle(
+        headline=f"{ticker} headline {idx}",
+        ticker=ticker,
+        source_api=NewsSource.TICKER_TICK,
+        url=f"https://example.test/{ticker}/{idx}",
+        published_at=datetime.utcnow(),
+        sentiment_score=sentiment,
+    )
 
 
 def _make_agent() -> ResearchAgent:
@@ -12,6 +26,7 @@ def _make_agent() -> ResearchAgent:
     exercise generate_report's branching logic."""
     a = ResearchAgent.__new__(ResearchAgent)
     a.config = MagicMock(SUBREDDITS=[], MIN_CATALYST_SCORE=0.0)
+    a.user_id = 1
     a.db = MagicMock()
     a.db.save_research = MagicMock()
     a.rate_limiter = MagicMock()
@@ -29,6 +44,7 @@ def _make_agent() -> ResearchAgent:
     a.sa_rss.get_ticker_intel = MagicMock(return_value={"article_count": 0})
     a.options_monitor = MagicMock()
     a.options_monitor.get_signals = MagicMock(return_value={})
+    a.options_monitor.scan_unusual_activity = MagicMock(return_value={})
     a.twelve_data = None
     a._report_cache = {}
     a.news_aggregator = MagicMock()
@@ -39,7 +55,7 @@ def test_newsapi_skipped_when_aggregator_has_coverage(monkeypatch):
     agent = _make_agent()
     # Aggregator returns 5 articles — above the 3-article threshold.
     agent.news_aggregator.fetch_news = MagicMock(return_value=[
-        {"title": f"headline {i}", "sentiment": 0.1} for i in range(5)
+        _fake_article("NVDA", i) for i in range(5)
     ])
     agent.news_aggregator.compute_sentiment = MagicMock(return_value=0.2)
 
@@ -60,7 +76,7 @@ def test_newsapi_called_when_aggregator_is_thin(monkeypatch):
     agent = _make_agent()
     # Aggregator returned 1 article — below the threshold.
     agent.news_aggregator.fetch_news = MagicMock(return_value=[
-        {"title": "lone headline", "sentiment": 0.1},
+        _fake_article("OBSCURE", 0),
     ])
     agent.news_aggregator.compute_sentiment = MagicMock(return_value=0.1)
 

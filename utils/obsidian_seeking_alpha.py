@@ -45,7 +45,7 @@ class ObsidianSeekingAlpha:
         """Find all Seeking Alpha email files in the vault."""
         email_dir = os.path.join(self.vault_path, "Email")
         if not os.path.isdir(email_dir):
-            logger.warning(f"Obsidian Email directory not found: {email_dir}")
+            logger.debug(f"Obsidian Email directory not found: {email_dir}")
             return []
 
         sa_files = []

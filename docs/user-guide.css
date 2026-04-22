@@ -1,0 +1,148 @@
+/* PDF styling for user-guide.pdf — brand-aligned with glass aesthetic.
+   WeasyPrint renders CSS but can't do backdrop-filter, so this is the
+   "print-friendly" cousin of the web THEME_CSS: solid brand colors + the
+   same indigo/teal/emerald/red/green palette, clean typography. */
+
+@page {
+    size: letter;
+    margin: 0.9in 0.8in 1in 0.8in;
+    @bottom-center {
+        content: "DeepThink Trader — Onboarding Guide  ·  page " counter(page) " of " counter(pages);
+        font-family: "Helvetica Neue", Arial, sans-serif;
+        font-size: 9pt;
+        color: #8A94A8;
+    }
+}
+
+@page :first { margin-top: 0; }
+
+html { font-size: 11pt; }
+
+body {
+    font-family: "Helvetica Neue", -apple-system, BlinkMacSystemFont, "SF Pro Text", Arial, sans-serif;
+    color: #1a1f2e;
+    line-height: 1.55;
+}
+
+/* Banner at top of document */
+p:first-of-type img { width: 100%; margin: 0 0 18pt 0; border-radius: 8pt; }
+
+h1, h2, h3, h4 {
+    font-family: "Helvetica Neue", -apple-system, "SF Pro Display", Arial, sans-serif;
+    color: #0B1030;
+    letter-spacing: -0.01em;
+}
+
+h1 {
+    font-size: 28pt;
+    font-weight: 800;
+    margin-top: 0;
+    border-bottom: 3pt solid;
+    border-image: linear-gradient(90deg, #FF4D6D 0%, #6366F1 50%, #00F5A0 100%) 1;
+    padding-bottom: 6pt;
+}
+
+h1:not(:first-of-type) { page-break-before: always; }
+
+h2 {
+    font-size: 18pt;
+    font-weight: 700;
+    margin-top: 22pt;
+    color: #0B1030;
+    border-bottom: 1pt solid #D8DEEA;
+    padding-bottom: 4pt;
+}
+
+h3 {
+    font-size: 14pt;
+    font-weight: 700;
+    margin-top: 16pt;
+    color: #2D3B5C;
+}
+
+h4 {
+    font-size: 12pt;
+    font-weight: 700;
+    margin-top: 12pt;
+    color: #3A4661;
+}
+
+p { margin: 0 0 8pt; }
+
+ul, ol { margin: 6pt 0 10pt 0; padding-left: 22pt; }
+li { margin-bottom: 3pt; }
+
+a { color: #6366F1; text-decoration: none; border-bottom: 0.5pt solid #6366F1; }
+
+strong { color: #0B1030; }
+
+hr {
+    border: none;
+    height: 2pt;
+    background: linear-gradient(90deg, transparent 0%, #D8DEEA 20%, #D8DEEA 80%, transparent 100%);
+    margin: 18pt 0;
+}
+
+code {
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    background: #F0F3FA;
+    color: #2D3B5C;
+    padding: 1pt 4pt;
+    border-radius: 3pt;
+    font-size: 9.5pt;
+    border: 0.5pt solid #E0E6F2;
+}
+
+pre {
+    background: #0B1030;
+    color: #ECF2FA;
+    padding: 12pt;
+    border-radius: 6pt;
+    font-size: 9pt;
+    line-height: 1.45;
+    overflow-x: auto;
+    page-break-inside: avoid;
+}
+
+pre code { background: transparent; border: none; color: inherit; padding: 0; font-size: inherit; }
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 10pt 0 14pt;
+    font-size: 10pt;
+    page-break-inside: avoid;
+}
+
+th {
+    background: linear-gradient(135deg, #6366F1 0%, #2DD4BF 100%);
+    color: white;
+    text-align: left;
+    padding: 6pt 8pt;
+    font-weight: 700;
+    font-size: 9pt;
+    text-transform: uppercase;
+    letter-spacing: 0.5pt;
+}
+
+td {
+    padding: 6pt 8pt;
+    border-bottom: 0.5pt solid #E0E6F2;
+    vertical-align: top;
+}
+
+tr:nth-child(even) td { background: #F7F9FE; }
+
+blockquote {
+    border-left: 3pt solid #6366F1;
+    background: #F0F3FA;
+    padding: 8pt 12pt;
+    margin: 10pt 0;
+    border-radius: 0 4pt 4pt 0;
+    color: #2D3B5C;
+}
+
+/* Callout emphasis used by markdown bold notes */
+p strong:first-child {
+    /* no transformation — just visible */
+}
