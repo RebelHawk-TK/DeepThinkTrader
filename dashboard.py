@@ -47,7 +47,33 @@ from utils.brand import ICON_PATH, BANNER_PATH
 from utils.theme import apply_theme, BRAND
 
 st.set_page_config(page_title="DeepThinkTrader", page_icon=ICON_PATH, layout="wide")
-st.image(BANNER_PATH, use_container_width=True)
+# Banner: full-width black band, image centered inside at 50% width so the
+# wordmark+tiles stay legible but the black background of the image
+# continues edge-to-edge of the viewport.
+import base64 as _b64
+with open(BANNER_PATH, "rb") as _bf:
+    _banner_b64 = _b64.b64encode(_bf.read()).decode()
+st.markdown(
+    f"""
+    <div style="
+        width: 100vw;
+        position: relative;
+        left: 50%;
+        right: 50%;
+        margin-left: -50vw;
+        margin-right: -50vw;
+        background: #000;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        padding: 0;
+    ">
+        <img src="data:image/png;base64,{_banner_b64}"
+             style="width: 50%; display: block;" />
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 apply_theme()
 
 # ── User bar (right-aligned) ───────────────────────────────
@@ -231,40 +257,67 @@ db = Database()
 config = Config()
 
 # ──────────────────────────────────────────────
-# Data fetchers
+# Per-user identity + Alpaca credentials
+# ──────────────────────────────────────────────
+from utils import secrets_vault
+from utils.secrets_vault import user_id_for_email
+
+USER_ID = user_id_for_email(CURRENT_USER["email"])
+if USER_ID is None:
+    st.error("Your user record is missing. Ask Tom to re-add you.")
+    st.stop()
+
+
+def _user_alpaca_headers(user_id: int) -> dict | None:
+    """Return request headers for this user's Alpaca account, or None when
+    the user hasn't added keys yet. Callers that depend on Alpaca data should
+    show an empty state when this returns None.
+    """
+    keys = secrets_vault.get_alpaca_keys(user_id)
+    if not keys:
+        return None
+    return {"APCA-API-KEY-ID": keys[0], "APCA-API-SECRET-KEY": keys[1]}
+
+
+# ──────────────────────────────────────────────
+# Data fetchers (user_id in cache key = per-user cache)
 # ──────────────────────────────────────────────
 
-ALPACA_HEADERS = {
-    "APCA-API-KEY-ID": config.ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
-}
-
 @st.cache_data(ttl=30)
-def get_alpaca_account():
+def get_alpaca_account(user_id: int):
+    headers = _user_alpaca_headers(user_id)
+    if headers is None:
+        return None
     try:
         resp = http_requests.get(
-            f"{config.ALPACA_BASE_URL}/v2/account", headers=ALPACA_HEADERS, timeout=5
+            f"{config.ALPACA_BASE_URL}/v2/account", headers=headers, timeout=5
         )
         return resp.json() if resp.ok else None
     except Exception:
         return None
 
 @st.cache_data(ttl=30)
-def get_alpaca_positions():
+def get_alpaca_positions(user_id: int):
+    headers = _user_alpaca_headers(user_id)
+    if headers is None:
+        return []
     try:
         resp = http_requests.get(
-            f"{config.ALPACA_BASE_URL}/v2/positions", headers=ALPACA_HEADERS, timeout=5
+            f"{config.ALPACA_BASE_URL}/v2/positions", headers=headers, timeout=5
         )
         return resp.json() if resp.ok else []
     except Exception:
         return []
 
 @st.cache_data(ttl=60)
-def get_portfolio_history():
+def get_portfolio_history(user_id: int):
+    headers = _user_alpaca_headers(user_id)
+    if headers is None:
+        return {}
     try:
         resp = http_requests.get(
             f"{config.ALPACA_BASE_URL}/v2/account/portfolio/history",
-            headers=ALPACA_HEADERS,
+            headers=headers,
             params={"period": "1A", "timeframe": "1D", "intraday_reporting": "market_hours", "pnl_reset": "per_day"},
             timeout=10,
         )
@@ -318,9 +371,9 @@ def get_spy_history():
     return []
 
 
-account = get_alpaca_account()
-positions = get_alpaca_positions()
-portfolio_hist = get_portfolio_history()
+account = get_alpaca_account(USER_ID)
+positions = get_alpaca_positions(USER_ID)
+portfolio_hist = get_portfolio_history(USER_ID)
 
 # ──────────────────────────────────────────────
 # Sidebar
@@ -414,13 +467,15 @@ if _selected_mode != _current_mode:
     # Check if market is open with open positions — block switch entirely.
     _open_count = 0
     try:
-        _open_count = len(db.get_open_trades())
+        _open_count = len(db.get_open_trades(USER_ID))
     except Exception:
         pass
     _market_open = False
     try:
         from utils.market_clock import get_market_clock
-        _market_open = get_market_clock().is_market_open()
+        _keys = secrets_vault.get_alpaca_keys(USER_ID)
+        if _keys:
+            _market_open = get_market_clock(_keys[0], _keys[1]).is_market_open()
     except Exception:
         pass
     _blocked = _market_open and _open_count > 0
@@ -527,6 +582,30 @@ if not bot_running:
     except Exception:
         pass
 
+# Cloud Run fallback: no PID file or launchd in a container. Query Cloud
+# Logging for a recent heartbeat from trader-bot; a log entry in the last
+# 5 minutes means the Cloud Run revision is alive.
+_cloud_last_activity = None
+if not bot_running:
+    try:
+        from google.cloud import logging as _gcl
+        _client = _gcl.Client()
+        _filter = (
+            'resource.type="cloud_run_revision" '
+            'AND resource.labels.service_name="trader-bot"'
+        )
+        _entries = list(_client.list_entries(
+            filter_=_filter, order_by=_gcl.DESCENDING, page_size=1, max_results=1,
+        ))
+        if _entries:
+            _ts = _entries[0].timestamp
+            _age = (dt.now(_ts.tzinfo) - _ts).total_seconds()
+            if _age < 300:
+                bot_running = True
+                _cloud_last_activity = _ts.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+
 if bot_running:
     # Compute uptime from process start time
     try:
@@ -549,8 +628,8 @@ if bot_running:
 else:
     st.sidebar.markdown("**Bot:** 🔴 Stopped")
 
-# Last activity from log
-last_activity = "Unknown"
+# Last activity from log (local dev). Falls back to Cloud Logging timestamp.
+last_activity = _cloud_last_activity or "Unknown"
 error_count_24h = 0
 if os.path.exists(log_path):
     try:
@@ -577,7 +656,10 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Market Clock")
 try:
     from utils.market_clock import get_market_clock
-    _mclock = get_market_clock()
+    _mkeys = secrets_vault.get_alpaca_keys(USER_ID)
+    if not _mkeys:
+        raise RuntimeError("no user keys for market clock")
+    _mclock = get_market_clock(_mkeys[0], _mkeys[1])
     _mstatus = _mclock.get_status()
     _open_icon = "🟢" if _mstatus["is_open"] else "🔴"
     _open_label = "OPEN" if _mstatus["is_open"] else "CLOSED"
@@ -615,8 +697,14 @@ st.sidebar.subheader("System Health")
 try:
     _db_health = db.health_check()
     _db_ok = _db_health.get("status") == "ok"
-    _journal = _db_health.get("journal_mode", "unknown")
-    st.sidebar.markdown(f"**Database:** {'🟢' if _db_ok else '🔴'} {_journal.upper()} mode")
+    # Postgres returns `dialect`; SQLite returns `journal_mode`.
+    if _db_health.get("dialect") == "postgresql":
+        _db_label = "POSTGRES"
+    elif _db_health.get("journal_mode"):
+        _db_label = f"SQLITE {_db_health['journal_mode'].upper()}"
+    else:
+        _db_label = "unknown"
+    st.sidebar.markdown(f"**Database:** {'🟢' if _db_ok else '🔴'} {_db_label}")
 except Exception:
     st.sidebar.markdown("**Database:** 🔴 unavailable")
 
@@ -638,13 +726,25 @@ try:
     else:
         st.sidebar.markdown("**Paused:** 🟢 None")
 
-    # Warmup progress
-    _warmup_seen = _sm.warmup_tickers_seen
+    # Warmup progress — DB-backed per-user counter (distinct tickers analyzed).
+    # State-file warmup_tickers_seen is legacy single-user and stays at 0 on
+    # Cloud Run where the dashboard has no filesystem access to the bot's state.
+    try:
+        with db._get_conn() as _wconn:
+            _row = _wconn.execute(
+                "SELECT COUNT(DISTINCT ticker) AS n FROM analysis_results WHERE user_id = ?",
+                (USER_ID,),
+            ).fetchone()
+        _warmup_seen = _row["n"] if _row else 0
+    except Exception:
+        _warmup_seen = 0
     _warmup_target = config.WARMUP_MIN_TICKERS
     if _warmup_seen < _warmup_target:
-        _warmup_pct = _warmup_seen / _warmup_target
+        _warmup_pct = min(1.0, _warmup_seen / _warmup_target) if _warmup_target else 1.0
         st.sidebar.markdown(f"**Warmup:** {_warmup_seen}/{_warmup_target} tickers")
         st.sidebar.progress(_warmup_pct)
+    else:
+        st.sidebar.markdown(f"**Warmup:** 🟢 {_warmup_seen}/{_warmup_target} tickers — ready")
 except Exception:
     pass
 
@@ -668,9 +768,9 @@ starting_balance = 100_000.0
 total_pnl = equity - starting_balance
 
 _pf = _portfolio_filter if _portfolio_filter != "all" else None
-all_trades = db.get_recent_trades(500, portfolio=_pf)
+all_trades = db.get_recent_trades(USER_ID, 500, portfolio=_pf)
 total_trades = len(all_trades)
-open_trades_db = db.get_open_trades(portfolio=_pf)
+open_trades_db = db.get_open_trades(USER_ID, portfolio=_pf)
 closed_trades = [t for t in all_trades if t.get("status") == "CLOSED"]
 winning_trades = [t for t in closed_trades if (t.get("pnl") or 0) > 0]
 losing_trades = [t for t in closed_trades if (t.get("pnl") or 0) < 0]
@@ -731,7 +831,11 @@ _log_path = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
 _bot_status, _bot_detail = compute_bot_status(_log_path)
 try:
     from utils.market_clock import get_market_clock as _get_clock
-    _market_label, _market_open = compute_market_state(_get_clock())
+    _cs_keys = secrets_vault.get_alpaca_keys(USER_ID)
+    if _cs_keys:
+        _market_label, _market_open = compute_market_state(_get_clock(_cs_keys[0], _cs_keys[1]))
+    else:
+        _market_label, _market_open = "?", False
 except Exception:
     _market_label, _market_open = "CLOSED", False
 _regime = compute_regime(config)
@@ -1151,8 +1255,8 @@ st.divider()
 st.markdown('<div class="section-header">Strategy Health</div>', unsafe_allow_html=True)
 
 def _show_strategy_health_top(portfolio_name: str):
-    stats = db.get_strategy_stats(portfolio_name, days=30)
-    baseline = db.get_strategy_stats(portfolio_name, days=90)
+    stats = db.get_strategy_stats(USER_ID, portfolio_name, days=30)
+    baseline = db.get_strategy_stats(USER_ID, portfolio_name, days=90)
     if stats["trade_count"] < 5:
         st.info(f"Not enough closed trades for {portfolio_name} portfolio health (need 5+, have {stats['trade_count']})")
         return
@@ -1329,15 +1433,25 @@ st.divider()
 
 # Pull the risk_manager instance lazily so importing dashboard.py in tests
 # doesn't reach out to Alpaca.
+_user_keys = secrets_vault.get_alpaca_keys(USER_ID)
 try:
     from utils.risk_manager import RiskManager
-    _rm = RiskManager(db=db)
-    _kelly = compute_kelly_state(db, _rm, portfolio=_pf if _pf else "main")
+    if _user_keys:
+        _rm = RiskManager(
+            user_id=USER_ID, api_key=_user_keys[0], secret_key=_user_keys[1], db=db,
+        )
+        _kelly = compute_kelly_state(db, _rm, USER_ID, portfolio=_pf if _pf else "main")
+    else:
+        _kelly = {"fraction": None, "n_trades": 0, "win_rate": None}
 except Exception:
     _kelly = {"fraction": None, "n_trades": 0, "win_rate": None}
-_cvar = compute_portfolio_cvar(positions, config)
-_top_corr = compute_top_correlation(positions, config)
-_reflections = compute_recent_reflections(db, limit=3)
+if _user_keys:
+    _cvar = compute_portfolio_cvar(positions, _user_keys[0], _user_keys[1])
+    _top_corr = compute_top_correlation(positions, _user_keys[0], _user_keys[1])
+else:
+    _cvar = None
+    _top_corr = None
+_reflections = compute_recent_reflections(db, USER_ID, limit=3)
 
 render_risk_memory(
     kelly_fraction=_kelly["fraction"],
@@ -1552,7 +1666,11 @@ if positions:
 
         fig_pie = px.pie(alloc_df, values="Value", names="Ticker", title="Portfolio Allocation",
                          hole=0.4, color_discrete_sequence=px.colors.qualitative.Set2)
-        fig_pie.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+        fig_pie.update_layout(
+            height=360,
+            margin=dict(l=10, r=10, t=40, b=60),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
+        )
         apply_chart_theme(fig_pie)
         st.plotly_chart(fig_pie, use_container_width=True)
 
@@ -1585,7 +1703,11 @@ if positions:
                 fig_sector = px.pie(sector_df, values="Value", names="Sector",
                                     title="Sector Exposure",
                                     hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel)
-                fig_sector.update_layout(height=300, margin=dict(l=0, r=0, t=40, b=0))
+                fig_sector.update_layout(
+                    height=360,
+                    margin=dict(l=10, r=10, t=40, b=60),
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.2, xanchor="center", x=0.5),
+                )
                 apply_chart_theme(fig_sector)
                 st.plotly_chart(fig_sector, use_container_width=True)
 else:
@@ -1850,7 +1972,7 @@ st.divider()
 # ──────────────────────────────────────────────
 
 st.markdown('<div class="section-header">Recent Analyses</div>', unsafe_allow_html=True)
-analyses = db.get_recent_analyses(100, portfolio=_pf)
+analyses = db.get_recent_analyses(USER_ID, 100, portfolio=_pf)
 if analyses:
     df_analysis = pd.DataFrame(analyses)
 

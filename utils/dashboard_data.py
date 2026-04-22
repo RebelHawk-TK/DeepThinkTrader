@@ -181,10 +181,10 @@ def compute_drawdown_from_peak(portfolio_hist: dict | None) -> float:
 # ─────────────────────────── Risk & Memory data ─────────────────────────
 
 
-def compute_kelly_state(db, risk_manager, portfolio: str = "main") -> dict[str, Any]:
+def compute_kelly_state(db, risk_manager, user_id: int, portfolio: str = "main") -> dict[str, Any]:
     """Return the current Kelly fraction the bot would use + context."""
     try:
-        stats = db.get_strategy_stats(portfolio)
+        stats = db.get_strategy_stats(user_id, portfolio)
         n = stats["trade_count"]
         if n >= 20 and stats["payoff_ratio"] > 0:
             f = risk_manager._kelly_fraction(
@@ -196,8 +196,12 @@ def compute_kelly_state(db, risk_manager, portfolio: str = "main") -> dict[str, 
         return {"fraction": None, "n_trades": 0, "win_rate": None}
 
 
-def compute_portfolio_cvar(positions: list[dict], config) -> float | None:
-    """Historical-simulation 5%-CVaR on current open positions."""
+def compute_portfolio_cvar(positions: list[dict], api_key: str, secret_key: str) -> float | None:
+    """Historical-simulation 5%-CVaR on current open positions.
+
+    Callers supply the signed-in user's Alpaca keys; CVaR is computed per user
+    because each user's open positions are their own.
+    """
     try:
         from analytics.cvar import portfolio_cvar
         from brokers.alpaca import AlpacaBroker
@@ -207,13 +211,13 @@ def compute_portfolio_cvar(positions: list[dict], config) -> float | None:
         }
         if not holdings:
             return 0.0
-        broker = AlpacaBroker(config)
+        broker = AlpacaBroker(api_key=api_key, secret_key=secret_key)
         return portfolio_cvar(broker, holdings)
     except Exception:
         return None
 
 
-def compute_top_correlation(positions: list[dict], config) -> tuple[str, str, float] | None:
+def compute_top_correlation(positions: list[dict], api_key: str, secret_key: str) -> tuple[str, str, float] | None:
     """Find the pair of held tickers with the highest pairwise correlation.
 
     Returns (ticker_a, ticker_b, corr) or None if fewer than 2 positions or
@@ -225,7 +229,7 @@ def compute_top_correlation(positions: list[dict], config) -> tuple[str, str, fl
         tickers = [p["symbol"] for p in positions]
         if len(tickers) < 2:
             return None
-        broker = AlpacaBroker(config)
+        broker = AlpacaBroker(api_key=api_key, secret_key=secret_key)
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=80)
         returns_by_ticker: dict[str, list[float]] = {}
@@ -254,8 +258,8 @@ def compute_top_correlation(positions: list[dict], config) -> tuple[str, str, fl
         return None
 
 
-def compute_recent_reflections(db, limit: int = 3) -> list[dict]:
+def compute_recent_reflections(db, user_id: int, limit: int = 3) -> list[dict]:
     try:
-        return db.get_reflections(limit=limit)
+        return db.get_reflections(user_id, limit=limit)
     except Exception:
         return []

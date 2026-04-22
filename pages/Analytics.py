@@ -18,8 +18,13 @@ st.set_page_config(page_title="DeepThinkTrader — Analytics", page_icon=_ICON, 
 
 from utils.theme import CHART_COLORS, CHART_LAYOUT, apply_theme
 from utils.streamlit_auth import require_auth
+from utils.secrets_vault import user_id_for_email
 apply_theme()
-require_auth()
+_user = require_auth()
+USER_ID = user_id_for_email(_user["email"])
+if USER_ID is None:
+    st.error("Your user record is missing. Ask Tom to re-add you.")
+    st.stop()
 
 db = Database()
 
@@ -29,22 +34,30 @@ st.caption("Slippage analytics and edge performance analysis")
 # ── Section 1: Slippage Analytics ──────────────────────────────
 st.header("Slippage Analytics")
 
-# Fetch slippage data
+# Fetch slippage data (scoped to signed-in user)
 with db._get_conn() as conn:
-    # KPI metrics
-    total_records = conn.execute("SELECT COUNT(*) as count FROM slippage_records").fetchone()
-    avg_slippage = conn.execute("SELECT AVG(slippage_pct) as avg FROM slippage_records").fetchone()
+    total_records = conn.execute(
+        "SELECT COUNT(*) as count FROM slippage_records WHERE user_id = ?",
+        (USER_ID,),
+    ).fetchone()
+    avg_slippage = conn.execute(
+        "SELECT AVG(slippage_pct) as avg FROM slippage_records WHERE user_id = ?",
+        (USER_ID,),
+    ).fetchone()
 
     market_avg = conn.execute(
-        "SELECT AVG(slippage_pct) as avg FROM slippage_records WHERE order_type = 'market'"
+        "SELECT AVG(slippage_pct) as avg FROM slippage_records WHERE user_id = ? AND order_type = 'market'",
+        (USER_ID,),
     ).fetchone()
 
     limit_avg = conn.execute(
-        "SELECT AVG(slippage_pct) as avg FROM slippage_records WHERE order_type = 'limit'"
+        "SELECT AVG(slippage_pct) as avg FROM slippage_records WHERE user_id = ? AND order_type = 'limit'",
+        (USER_ID,),
     ).fetchone()
 
     worst = conn.execute(
-        "SELECT MAX(ABS(slippage_pct)) as worst FROM slippage_records"
+        "SELECT MAX(ABS(slippage_pct)) as worst FROM slippage_records WHERE user_id = ?",
+        (USER_ID,),
     ).fetchone()
 
 # KPI Row
@@ -69,10 +82,11 @@ with col_left:
                    AVG(slippage_pct) as avg_slippage,
                    COUNT(*) as trade_count
             FROM slippage_records
+            WHERE user_id = ?
             GROUP BY ticker
             ORDER BY avg_slippage DESC
             LIMIT 20
-        """).fetchall()
+        """, (USER_ID,)).fetchall()
 
     if ticker_data:
         tickers = [row["ticker"] for row in ticker_data]
@@ -121,8 +135,9 @@ with col_right:
                    AVG(slippage_pct) as avg_slippage,
                    COUNT(*) as trade_count
             FROM slippage_records
+            WHERE user_id = ?
             GROUP BY order_type
-        """).fetchall()
+        """, (USER_ID,)).fetchall()
 
     if order_type_data:
         order_types = [row["order_type"] for row in order_type_data]
@@ -159,9 +174,10 @@ with db._get_conn() as conn:
     time_data = conn.execute("""
         SELECT timestamp, slippage_pct, order_type, ticker
         FROM slippage_records
+        WHERE user_id = ?
         ORDER BY timestamp DESC
         LIMIT 500
-    """).fetchall()
+    """, (USER_ID,)).fetchall()
 
 if time_data:
     timestamps = [datetime.fromisoformat(row["timestamp"]) for row in time_data]
@@ -237,8 +253,8 @@ with col_main:
                    MAX(slippage_pct) as max,
                    COUNT(*) as count
             FROM slippage_records
-            WHERE portfolio = 'main'
-        """).fetchone()
+            WHERE user_id = ? AND portfolio = 'main'
+        """, (USER_ID,)).fetchone()
 
     if main_stats and main_stats["count"] > 0:
         st.metric("Main Portfolio", f"{main_stats['avg']:.3f}%")
@@ -254,8 +270,8 @@ with col_penny:
                    MAX(slippage_pct) as max,
                    COUNT(*) as count
             FROM slippage_records
-            WHERE portfolio = 'penny'
-        """).fetchone()
+            WHERE user_id = ? AND portfolio = 'penny'
+        """, (USER_ID,)).fetchone()
 
     if penny_stats and penny_stats["count"] > 0:
         st.metric("Penny Portfolio", f"{penny_stats['avg']:.3f}%")
@@ -273,8 +289,8 @@ with db._get_conn() as conn:
     edge_trades = conn.execute("""
         SELECT id, ticker, pnl, conviction, edges_fired, edge_details, portfolio
         FROM trades
-        WHERE status = 'CLOSED' AND edge_details IS NOT NULL AND edge_details != '[]'
-    """).fetchall()
+        WHERE user_id = ? AND status = 'CLOSED' AND edge_details IS NOT NULL AND edge_details != '[]'
+    """, (USER_ID,)).fetchall()
 
 if not edge_trades:
     st.info("No closed trades with edge data available. Complete some trades to see edge performance.")
@@ -411,9 +427,9 @@ else:
         time_trades = conn.execute("""
             SELECT timestamp, edge_details
             FROM trades
-            WHERE status = 'CLOSED' AND edge_details IS NOT NULL AND edge_details != '[]'
+            WHERE user_id = ? AND status = 'CLOSED' AND edge_details IS NOT NULL AND edge_details != '[]'
             ORDER BY timestamp ASC
-        """).fetchall()
+        """, (USER_ID,)).fetchall()
 
     if len(time_trades) >= 20:
         window = 20

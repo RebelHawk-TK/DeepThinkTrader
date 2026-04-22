@@ -21,8 +21,13 @@ st.set_page_config(page_title="Trade Detail", page_icon=_ICON, layout="wide")
 
 from utils.theme import CHART_COLORS, CHART_LAYOUT, apply_theme
 from utils.streamlit_auth import require_auth
+from utils.secrets_vault import user_id_for_email
 apply_theme()
-require_auth()
+_user = require_auth()
+USER_ID = user_id_for_email(_user["email"])
+if USER_ID is None:
+    st.error("Your user record is missing. Ask Tom to re-add you.")
+    st.stop()
 
 def apply_chart_theme(fig):
     """Apply consistent dark theme to any Plotly figure."""
@@ -78,7 +83,7 @@ st.title("Trade Detail")
 query_params = st.query_params
 trade_id_param = query_params.get("trade_id")
 
-recent_trades = db.get_recent_trades(limit=500)
+recent_trades = db.get_recent_trades(USER_ID, limit=500)
 
 if not recent_trades:
     st.warning("No trades found in database.")
@@ -172,14 +177,25 @@ edge_details = trade.get("edge_details")
 if edge_details:
     try:
         edges = json.loads(edge_details) if isinstance(edge_details, str) else edge_details
+        # edges is a list of {label, passed, details:[...]} — matches the
+        # structure DeepThinkAgent writes. Legacy rows may store a dict; handle both.
         edge_rows = []
-        for edge_name, edge_data in edges.items():
-            status = "PASS" if edge_data.get("passed") else "FAIL"
-            detail = edge_data.get("detail", "")
+        if isinstance(edges, dict):
+            iter_edges = [
+                {"label": k, "passed": v.get("passed"), "details": [v.get("detail", "")]}
+                for k, v in edges.items()
+            ]
+        else:
+            iter_edges = edges or []
+        for edge in iter_edges:
+            status = "PASS" if edge.get("passed") else "FAIL"
+            details_val = edge.get("details") or edge.get("detail") or ""
+            if isinstance(details_val, list):
+                details_val = ", ".join(str(d) for d in details_val)
             edge_rows.append({
-                "Edge": edge_name,
+                "Edge": edge.get("label") or edge.get("name") or "—",
                 "Status": status,
-                "Detail": detail,
+                "Detail": details_val,
             })
 
         if edge_rows:
@@ -190,7 +206,7 @@ if edge_details:
                 color = "color: #4caf50;" if val == "PASS" else "color: #f44336;"
                 return color
 
-            styled_df = df_edges.style.applymap(color_status, subset=["Status"])
+            styled_df = df_edges.style.map(color_status, subset=["Status"])
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
         else:
             st.info("No edge details recorded.")

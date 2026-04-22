@@ -25,45 +25,63 @@ st.set_page_config(page_title="Risk Dashboard", page_icon=_ICON, layout="wide")
 
 from utils.theme import CHART_COLORS, CHART_LAYOUT, apply_theme
 from utils.streamlit_auth import require_auth
+from utils import secrets_vault
+from utils.secrets_vault import user_id_for_email
 apply_theme()
-require_auth()
+_user = require_auth()
+USER_ID = user_id_for_email(_user["email"])
+if USER_ID is None:
+    st.error("Your user record is missing. Ask Tom to re-add you.")
+    st.stop()
 
 db = Database()
 config = Config()
 
-ALPACA_HEADERS = {
-    "APCA-API-KEY-ID": config.ALPACA_API_KEY,
-    "APCA-API-SECRET-KEY": config.ALPACA_SECRET_KEY,
-}
 
-# ── Data Fetchers ────────────────────────────────────────────
+def _user_alpaca_headers(user_id: int) -> dict | None:
+    keys = secrets_vault.get_alpaca_keys(user_id)
+    if not keys:
+        return None
+    return {"APCA-API-KEY-ID": keys[0], "APCA-API-SECRET-KEY": keys[1]}
+
+
+# ── Data Fetchers (per-user cache keys) ─────────────────────
 
 @st.cache_data(ttl=30)
-def get_alpaca_account():
+def get_alpaca_account(user_id: int):
+    headers = _user_alpaca_headers(user_id)
+    if headers is None:
+        return None
     try:
         resp = http_requests.get(
-            f"{config.ALPACA_BASE_URL}/v2/account", headers=ALPACA_HEADERS, timeout=5
+            f"{config.ALPACA_BASE_URL}/v2/account", headers=headers, timeout=5
         )
         return resp.json() if resp.ok else None
     except Exception:
         return None
 
 @st.cache_data(ttl=30)
-def get_alpaca_positions():
+def get_alpaca_positions(user_id: int):
+    headers = _user_alpaca_headers(user_id)
+    if headers is None:
+        return []
     try:
         resp = http_requests.get(
-            f"{config.ALPACA_BASE_URL}/v2/positions", headers=ALPACA_HEADERS, timeout=5
+            f"{config.ALPACA_BASE_URL}/v2/positions", headers=headers, timeout=5
         )
         return resp.json() if resp.ok else []
     except Exception:
         return []
 
 @st.cache_data(ttl=60)
-def get_spy_snapshot():
+def get_spy_snapshot(user_id: int):
+    headers = _user_alpaca_headers(user_id)
+    if headers is None:
+        return None
     try:
         resp = http_requests.get(
             "https://data.alpaca.markets/v2/stocks/SPY/snapshot",
-            headers=ALPACA_HEADERS,
+            headers=headers,
             timeout=5
         )
         return resp.json() if resp.ok else None
@@ -115,14 +133,14 @@ def get_ticker_sector(ticker: str) -> str:
 
 def calculate_drawdown() -> tuple[float, float]:
     """Calculate current drawdown vs peak and threshold."""
-    account = get_alpaca_account()
+    account = get_alpaca_account(USER_ID)
     if not account:
         return 0.0, config.MAX_DRAWDOWN_HALT_PCT
 
     equity = float(account.get("equity", 0))
 
     # Get peak equity from DB
-    peak_equity = db.get_peak_equity(days=30)
+    peak_equity = db.get_peak_equity(USER_ID, days=30)
 
     # If no peak recorded yet, use current equity as baseline
     if peak_equity <= 0:
@@ -142,11 +160,11 @@ def calculate_drawdown() -> tuple[float, float]:
 
 def calculate_daily_loss() -> tuple[float, float]:
     """Calculate today's realized P&L as % of account vs limit."""
-    account = get_alpaca_account()
+    account = get_alpaca_account(USER_ID)
     if not account:
         return 0.0, config.MAX_DAILY_LOSS
 
-    today_data = db.get_today_pnl()
+    today_data = db.get_today_pnl(USER_ID)
     realized_pnl = today_data.get("realized_pnl", 0)
     equity = float(account.get("equity", 50000))
 
@@ -156,7 +174,7 @@ def calculate_daily_loss() -> tuple[float, float]:
 
 def get_spy_change() -> tuple[float, float]:
     """Get today's SPY change % and threshold."""
-    spy_data = get_spy_snapshot()
+    spy_data = get_spy_snapshot(USER_ID)
     if not spy_data or "dailyBar" not in spy_data:
         return 0.0, config.CIRCUIT_BREAKER_SPY_DROP_PCT
 
@@ -173,8 +191,8 @@ def get_spy_change() -> tuple[float, float]:
 
 def calculate_sector_exposure():
     """Calculate market value per sector from open positions."""
-    positions = get_alpaca_positions()
-    account = get_alpaca_account()
+    positions = get_alpaca_positions(USER_ID)
+    account = get_alpaca_account(USER_ID)
 
     if not account:
         return {}
@@ -201,7 +219,7 @@ def calculate_sector_exposure():
 
 def count_consecutive_losses() -> tuple[int, list]:
     """Count consecutive losses from most recent trade backwards."""
-    recent_trades = db.get_recent_trades(limit=500)
+    recent_trades = db.get_recent_trades(USER_ID, limit=500)
 
     # Filter only closed trades with P&L
     closed_trades = [
@@ -494,8 +512,8 @@ with col2:
 st.markdown("---")
 st.markdown("### Position Risk Table")
 
-positions = get_alpaca_positions()
-open_trades = db.get_open_trades()
+positions = get_alpaca_positions(USER_ID)
+open_trades = db.get_open_trades(USER_ID)
 
 if positions and open_trades:
     # Match positions with trade records
@@ -693,7 +711,7 @@ if sector_etfs:
 
     breadth_df = pd.DataFrame(sector_etfs)
     st.dataframe(
-        breadth_df[["ticker", "change", "status"]].style.applymap(
+        breadth_df[["ticker", "change", "status"]].style.map(
             lambda v: "color: green" if v == "advancing" else "color: red",
             subset=["status"]
         ),

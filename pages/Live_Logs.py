@@ -33,12 +33,15 @@ st.markdown("""<style>
 .log-warmup { color: #ffeb3b; }
 .log-block { color: #ff5722; }
 .log-container {
-    background: #0e1117;
-    border: 1px solid #333;
-    border-radius: 8px;
+    background: rgba(24, 30, 48, 0.55);
+    border: 1px solid rgba(142, 175, 255, 0.14);
+    border-radius: 16px;
     padding: 16px;
     max-height: 700px;
     overflow-y: auto;
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 8px 24px rgba(0,0,0,0.35);
 }
 </style>""", unsafe_allow_html=True)
 
@@ -84,10 +87,56 @@ def colorize_line(line: str) -> str:
     return f'<div class="log-line {css_class}">{safe}</div>'
 
 
+def _fetch_cloud_logs(service_name: str, n: int) -> list[str]:
+    """Fetch last N log entries from Cloud Logging for a Cloud Run service.
+
+    Used as a fallback when the on-disk file isn't present (production runs
+    on Cloud Run, which writes to stdout and is captured by Cloud Logging,
+    not to a local file).
+    """
+    try:
+        from google.cloud import logging as gcl
+    except ImportError:
+        return [
+            "google-cloud-logging not installed. Install: pip install google-cloud-logging",
+        ]
+    try:
+        client = gcl.Client()
+        filter_str = (
+            'resource.type="cloud_run_revision" '
+            f'AND resource.labels.service_name="{service_name}"'
+        )
+        entries = list(client.list_entries(
+            filter_=filter_str,
+            order_by=gcl.DESCENDING,
+            page_size=n,
+            max_results=n,
+        ))
+        entries.reverse()  # oldest first so the viewer reads naturally
+        out: list[str] = []
+        for e in entries:
+            ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
+            payload = e.payload
+            if isinstance(payload, dict):
+                msg = payload.get("message", str(payload))
+            else:
+                msg = str(payload) if payload is not None else ""
+            severity = (e.severity or "INFO").ljust(7)
+            out.append(f"{ts} [{severity}] {msg}".rstrip())
+        return out or ["(no recent Cloud Logging entries)"]
+    except Exception as exc:
+        return [f"Cloud Logging fetch failed: {exc}"]
+
+
 def read_log_tail(filepath: str, n: int) -> list[str]:
-    """Read last N lines of a log file efficiently."""
+    """Read last N lines of a log file efficiently.
+
+    Falls back to Cloud Logging for the matching Cloud Run service when the
+    on-disk file isn't present (production deploy).
+    """
     if not os.path.exists(filepath):
-        return [f"Log file not found: {filepath}"]
+        service = "trader-bot" if filepath.endswith("deepthinktrader.log") else "trader-dashboard"
+        return _fetch_cloud_logs(service, n)
     try:
         with open(filepath, "rb") as f:
             # Seek from end to find last N newlines

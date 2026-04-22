@@ -28,8 +28,22 @@ _SIGNOUT_URL = "https://trader.travelforge.ai/?gcp-iap-mode=CLEAR_LOGIN_COOKIE"
 
 
 def render_session_sidebar(user: dict) -> None:
-    """Show signed-in email + sign-out link in the sidebar. Call after require_auth()."""
+    """Show signed-in email + sign-out link in the sidebar. Call after require_auth().
+
+    Also hides the Admin page nav link for non-admin users. Streamlit auto-
+    generates sidebar links from pages/*.py; CSS on the href keeps the link
+    out of sight even though the file exists (pages/Admin.py still enforces
+    the role check server-side).
+    """
     import streamlit as st
+
+    if user.get("role") != "admin":
+        st.markdown(
+            """<style>
+            [data-testid="stSidebarNavLink"][href$="/Admin"] { display:none !important; }
+            </style>""",
+            unsafe_allow_html=True,
+        )
 
     st.sidebar.markdown(
         f"""<div style='padding:12px 8px;border-top:1px solid #2A3446;
