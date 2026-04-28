@@ -129,18 +129,32 @@ class TunableParams:
         with self._lock:
             return dict(self._values)
 
-    def set(self, name: str, value: float) -> float:
+    def set(self, name: str, value: float, *, source: str = "manual") -> float:
         spec = _SPECS_BY_NAME.get(name)
         if spec is None:
             raise KeyError(f"unknown tunable param: {name!r}")
+        # Phase 3.4: operator freeze. TUNABLE_PARAMS_FROZEN=1 halts auto-apply
+        # but lets manual edits through (Tom can still react to a market event).
+        if source == "auto" and os.getenv("TUNABLE_PARAMS_FROZEN") == "1":
+            raise PermissionError(
+                "TUNABLE_PARAMS_FROZEN=1 — auto-apply is disabled. "
+                "Unset the env var or use source='manual' to override."
+            )
         v = float(value)
         if not (spec.low <= v <= spec.high):
             raise ValueError(f"{name}={v} out of range [{spec.low}, {spec.high}]")
         v = int(v) if spec.is_int else v
         with self._lock:
+            old = self._values.get(name)
             self._values[name] = v
             self._write_atomic(self._values)
-        logger.info(f"tunable_params: set {name}={v}")
+        logger.info(f"tunable_params: set {name}={v} (was {old}, source={source})")
+        # Phase 3.2: every change goes to the audit log.
+        try:
+            from utils.change_log import log_param_change
+            log_param_change(param=name, old_value=old, new_value=v, source=source)
+        except Exception as e:
+            logger.debug(f"change_log write failed: {e}")
         return v
 
     def reset(self, name: str) -> float:

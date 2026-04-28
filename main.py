@@ -546,6 +546,15 @@ class BotOrchestrator:
         except Exception as e:
             logger.debug(f"Daily snapshot write failed: {e}")
 
+        # Daily digest: idempotent, only writes today's file once. Reads the
+        # snapshot we just wrote and runs the recommender. Returns empty
+        # recommendations until 30+ days of snapshot data exist.
+        try:
+            from utils.digest_writer import maybe_write_digest
+            maybe_write_digest()
+        except Exception as e:
+            logger.debug(f"Daily digest write failed: {e}")
+
     def _check_exits_only(self) -> None:
         """Fast per-user exit check — only price checks on open positions."""
         keys = self._pick_service_keys()

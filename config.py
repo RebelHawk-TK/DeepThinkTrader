@@ -277,3 +277,33 @@ class Config:
             warnings.append("NOTIFICATIONS_ENABLED=true but SLACK_WEBHOOK_URL is empty")
 
         return errors, warnings
+
+
+# Phase 2.1: Override the 11 tunable attrs from utils.tunable_params at import
+# time. Values in tunable_params.json win over env-var defaults. Picked up on
+# next restart — live reload is Phase 3 work.
+_TUNABLE_OVERRIDES = (
+    ("KELLY_SAFETY_MULTIPLIER", "kelly_safety_multiplier"),
+    ("MAX_RISK_PER_TRADE", "max_risk_per_trade"),
+    ("MAX_DAILY_LOSS", "max_daily_loss"),
+    ("MIN_CONVICTION", "min_conviction"),
+    ("MIN_REWARD_RISK_RATIO", "min_reward_risk_ratio"),
+    ("MAX_POSITION_PCT", "max_position_pct"),
+    ("MAX_OPEN_POSITIONS", "max_open_positions"),
+    ("MAX_SECTOR_EXPOSURE_PCT", "max_sector_exposure_pct"),
+    ("MAX_DRAWDOWN_HALT_PCT", "max_drawdown_halt_pct"),
+    ("TRAILING_STOP_ACTIVATION_PCT", "trailing_stop_activation_pct"),
+    ("TRAILING_STOP_DISTANCE_PCT", "trailing_stop_distance_pct"),
+)
+try:
+    from utils.tunable_params import get_tunable_params as _get_tp
+    _tp_values = _get_tp().get_all()
+    for _attr, _key in _TUNABLE_OVERRIDES:
+        if _key in _tp_values:
+            _v = _tp_values[_key]
+            # MAX_OPEN_POSITIONS is int in the existing config; coerce.
+            setattr(Config, _attr, int(_v) if _attr == "MAX_OPEN_POSITIONS" else float(_v))
+except Exception:
+    # If the registry isn't available (corrupt JSON, missing module), keep
+    # the env-var defaults. Bot stays functional.
+    pass
