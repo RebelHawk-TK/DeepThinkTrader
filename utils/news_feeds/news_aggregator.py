@@ -68,6 +68,11 @@ class NewsAggregator:
         if priority == "high":
             return available
 
+        # Marketaux free tier = 100 req/day. Restrict to high-priority tickers only.
+        available = [s for s in available if s != NewsSource.MARKETAUX]
+        if not available:
+            return []
+
         if priority == "low":
             if NewsSource.TICKER_TICK in self.clients:
                 return [NewsSource.TICKER_TICK]
