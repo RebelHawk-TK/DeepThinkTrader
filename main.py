@@ -61,6 +61,14 @@ class DeepThinkTrader:
         # Startup reconcile: close any DB-OPEN trades missing from Alpaca for
         # this user. Ghosts appear when the bot crashes mid-close.
         self.execution.reconcile_open_trades()
+        # Also clean up stale pending limit orders — bot may have submitted
+        # them before crashing, then never canceled them on the 30-min stale rule.
+        try:
+            stale = self.execution.check_pending_orders()
+            if stale:
+                logger.info(f"Startup pending-order check: {len(stale)} order(s) reconciled")
+        except Exception as e:
+            logger.error(f"Startup pending-order check failed: {e}")
         self._last_scan_date: str = last_scan_date or state.last_scan_date
         # Cache the dynamic watchlist passed in from the orchestrator so we
         # don't rebuild it per-user (sector lists are global market data).
@@ -520,6 +528,15 @@ class BotOrchestrator:
                 self._last_scan_date = trader._last_scan_date
             except Exception as e:
                 logger.error(f"User {uid} cycle failed: {e}", exc_info=True)
+
+        # Heartbeat: written only on cycle completion so external tools can
+        # detect a stalled bot by checking file mtime against expected cadence.
+        try:
+            heartbeat_path = os.path.join(os.path.dirname(__file__), ".last_cycle.txt")
+            with open(heartbeat_path, "w") as f:
+                f.write(datetime.now().isoformat())
+        except Exception as e:
+            logger.debug(f"Heartbeat write failed: {e}")
 
     def _check_exits_only(self) -> None:
         """Fast per-user exit check — only price checks on open positions."""

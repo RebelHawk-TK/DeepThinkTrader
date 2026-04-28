@@ -55,6 +55,11 @@ class ClaudeAnalyst:
         """
         if not self.enabled:
             return None
+        import time
+        from utils.llm_logger import log_call
+        start = time.monotonic()
+        response = None
+        error = None
         try:
             response = self._client.messages.create(
                 model=self._model,
@@ -68,8 +73,19 @@ class ClaudeAnalyst:
             )
             return response.content[0].text
         except Exception as e:
+            error = str(e)
             logger.error(f"Claude API error: {e}")
             return None
+        finally:
+            log_call(
+                source="claude_analyst",
+                model=self._model,
+                system=system,
+                prompt=prompt,
+                response=response,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error=error,
+            )
 
     def _parse_json_response(self, text: str | None) -> dict | None:
         """Extract JSON from Claude's response."""

@@ -14,3 +14,7 @@ venv/
 trades.db-wal
 trades.db-shm
 *.log.*
+
+# LLM call logs (potential training data — kept local, not committed)
+logs/
+.last_cycle.txt

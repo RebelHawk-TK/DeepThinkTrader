@@ -52,6 +52,11 @@ class DebateEngine:
         self.model = model
 
     def _call(self, system: str, prompt: str, max_tokens: int = 1024) -> str | None:
+        import time
+        from utils.llm_logger import log_call
+        start = time.monotonic()
+        response = None
+        error = None
         try:
             response = self.client.messages.create(
                 model=self.model,
@@ -61,8 +66,19 @@ class DebateEngine:
             )
             return response.content[0].text
         except Exception as e:
+            error = str(e)
             logger.error(f"Debate LLM call failed: {e}")
             return None
+        finally:
+            log_call(
+                source="debate_engine",
+                model=self.model,
+                system=system,
+                prompt=prompt,
+                response=response,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error=error,
+            )
 
     def _parse_json(self, text: str | None) -> dict | None:
         if not text:
