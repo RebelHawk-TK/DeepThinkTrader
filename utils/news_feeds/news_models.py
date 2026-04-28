@@ -1,7 +1,7 @@
 """Unified data model for news articles across all API sources."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
@@ -29,7 +29,16 @@ class NewsArticle:
     image_url: Optional[str] = None
     relevance_score: Optional[float] = None  # 0.0 to 1.0
     raw_data: Optional[dict[str, Any]] = None
-    fetched_at: datetime = field(default_factory=datetime.utcnow)
+    fetched_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self):
+        # Normalize published_at to UTC-aware. Some clients return naive
+        # datetimes (strptime, utcfromtimestamp); Marketaux returns aware.
+        # Mixing them blows up sorts in NewsAggregator.
+        if self.published_at.tzinfo is None:
+            self.published_at = self.published_at.replace(tzinfo=timezone.utc)
+        if self.fetched_at.tzinfo is None:
+            self.fetched_at = self.fetched_at.replace(tzinfo=timezone.utc)
 
     def to_dict(self) -> dict[str, Any]:
         return {
