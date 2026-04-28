@@ -400,13 +400,21 @@ class DeepThinkAgent:
 
         return edges_firing, edges
 
-    def analyze(self, report: dict, portfolio: str = "main") -> dict:
-        """Run full deep-think analysis on a research report."""
+    def analyze(self, report: dict, portfolio: str = "main", news_priority: str = "medium") -> dict:
+        """Run deep-think analysis on a research report.
+
+        news_priority gates LLM cost (Phase 2 cycle speedup):
+          - "high"   (top 5 tickers): full pipeline — Claude + debate
+          - "medium" (next 20):       Claude only, debate skipped
+          - "low"    (tail):          rules only, no LLM calls
+        """
+        from utils.cycle_timing import time_stage
         ticker = report["ticker"]
-        logger.info(f"DeepThink analysis starting for {ticker} [{portfolio}]...")
+        logger.info(f"DeepThink analysis starting for {ticker} [{portfolio}, prio={news_priority}]...")
 
         # Step 1 & 2: Score factors
-        bullish, bearish = self._score_factors(report)
+        with time_stage(ticker, news_priority, "score_factors"):
+            bullish, bearish = self._score_factors(report)
 
         # Step 3: Contrarian analysis
         contrarian = self._contrarian_analysis(bullish, bearish, report)
@@ -521,30 +529,37 @@ class DeepThinkAgent:
             action = "HOLD"
             edge_reason = "Conviction below threshold"
 
-        # Step 8a: Bull/Bear debate — adversarial analysis before Claude review
-        # Skip on HOLD: rules already said "do nothing", debate would only
-        # produce a SELL-override path we don't want to pay tokens for.
+        # Step 8a: Bull/Bear debate — adversarial analysis before Claude review.
+        # Gated to high-priority tickers only (top 5 from scanner) since each
+        # debate is 5 LLM calls. Also skipped on HOLD (rules already said "do
+        # nothing"; debate would only produce a SELL-override path).
         # Cache by ticker so multi-user cycles reuse one API call.
         debate_result = None
-        if self.debate_engine and action != "HOLD":
-            debate_result = debate_cache().get(ticker)
-            if debate_result is not None:
-                logger.info(f"Debate cache HIT for {ticker} (reused across users)")
-            else:
-                try:
-                    pre_debate = {
-                        "action": action, "conviction": conviction,
-                        "bullish_factors": bullish, "bearish_factors": bearish,
-                        "edge_details": edge_details,
-                    }
-                    debate_result = self.debate_engine.run_debate(
-                        report=report,
-                        rule_analysis=pre_debate,
-                        rounds=getattr(self.config, "DEBATE_ROUNDS", 2),
-                    )
-                    debate_cache().set(ticker, debate_result)
-                except Exception as e:
-                    logger.error(f"Debate failed for {ticker}: {e}")
+        debate_eligible = (
+            self.debate_engine is not None
+            and action != "HOLD"
+            and news_priority == "high"
+        )
+        if debate_eligible:
+            with time_stage(ticker, news_priority, "debate"):
+                debate_result = debate_cache().get(ticker)
+                if debate_result is not None:
+                    logger.info(f"Debate cache HIT for {ticker} (reused across users)")
+                else:
+                    try:
+                        pre_debate = {
+                            "action": action, "conviction": conviction,
+                            "bullish_factors": bullish, "bearish_factors": bearish,
+                            "edge_details": edge_details,
+                        }
+                        debate_result = self.debate_engine.run_debate(
+                            report=report,
+                            rule_analysis=pre_debate,
+                            rounds=getattr(self.config, "DEBATE_ROUNDS", 2),
+                        )
+                        debate_cache().set(ticker, debate_result)
+                    except Exception as e:
+                        logger.error(f"Debate failed for {ticker}: {e}")
 
             if debate_result:
                 debate_conv = debate_result["conviction"]
@@ -559,23 +574,26 @@ class DeepThinkAgent:
                     )
                     action = debate_result["decision"]
 
-        # Step 8b: Claude qualitative analysis — final review after debate
+        # Step 8b: Claude qualitative analysis — final review.
+        # Gated to high+medium priority. Low-priority tickers stay rules-only.
         # Cache by ticker so multi-user cycles reuse one API call.
         claude_analysis = {}
-        if self.claude.enabled:
-            cached_claude = claude_cache().get(ticker)
-            if cached_claude is not None:
-                claude_analysis = cached_claude
-                logger.info(f"Claude cache HIT for {ticker} (reused across users)")
-            else:
-                pre_claude_analysis = {
-                    "action": action, "conviction": conviction,
-                    "bullish_factors": bullish, "bearish_factors": bearish,
-                    "edge_details": edge_details,
-                    "debate": debate_result,
-                }
-                claude_analysis = self.claude.analyze_trade(report, pre_claude_analysis)
-                claude_cache().set(ticker, claude_analysis)
+        claude_eligible = self.claude.enabled and news_priority in ("high", "medium")
+        if claude_eligible:
+            with time_stage(ticker, news_priority, "claude_analyst"):
+                cached_claude = claude_cache().get(ticker)
+                if cached_claude is not None:
+                    claude_analysis = cached_claude
+                    logger.info(f"Claude cache HIT for {ticker} (reused across users)")
+                else:
+                    pre_claude_analysis = {
+                        "action": action, "conviction": conviction,
+                        "bullish_factors": bullish, "bearish_factors": bearish,
+                        "edge_details": edge_details,
+                        "debate": debate_result,
+                    }
+                    claude_analysis = self.claude.analyze_trade(report, pre_claude_analysis)
+                    claude_cache().set(ticker, claude_analysis)
 
             # Apply conviction adjustment (scaled by Claude's confidence)
             adj = claude_analysis.get("conviction_adjustment", 0)

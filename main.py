@@ -209,11 +209,14 @@ class DeepThinkTrader:
                     news_priority = "low"
 
                 logger.info(f"\n--- [{label}] Researching {ticker} (news={news_priority}) ---")
-                report = self.research.generate_report(ticker, news_priority=news_priority)
+                from utils.cycle_timing import time_stage
+                with time_stage(ticker, news_priority, "research"):
+                    report = self.research.generate_report(ticker, news_priority=news_priority)
 
-                # Step 2: Deep analysis
+                # Step 2: Deep analysis (priority gates LLM cost — see deepthink_agent.analyze)
                 logger.info(f"--- [{label}] Analyzing {ticker} ---")
-                analysis = self.deepthink.analyze(report, portfolio=portfolio)
+                with time_stage(ticker, news_priority, "deepthink_total"):
+                    analysis = self.deepthink.analyze(report, portfolio=portfolio, news_priority=news_priority)
 
                 # Step 3: Execute (or hold)
                 logger.info(f"--- [{label}] Execution check for {ticker} ---")
