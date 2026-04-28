@@ -975,12 +975,75 @@ class Database:
         }
 
     def get_strategy_performance(self, user_id: int, portfolio: str = "main", days: int = 30) -> dict:
-        """Detailed performance for post-trade learning. Returns win rate trend."""
+        """Detailed performance for post-trade learning + observability snapshots.
+
+        Merges win rate / payoff stats with risk-adjusted metrics (Sharpe,
+        Sortino, max drawdown, avg R-multiple) so callers get one combined view.
+        """
         stats = self.get_strategy_stats(user_id, portfolio, days)
         baseline = self.get_strategy_stats(user_id, portfolio, days * 3)
         stats["baseline_win_rate"] = baseline["win_rate"]
         stats["win_rate_delta"] = stats["win_rate"] - baseline["win_rate"] if baseline["trade_count"] >= 20 else 0
+        stats.update(self.get_advanced_metrics(user_id, portfolio, days))
         return stats
+
+    def get_advanced_metrics(self, user_id: int, portfolio: str = "main", days: int = 30) -> dict:
+        """Risk-adjusted metrics: Sharpe, Sortino, max drawdown %, avg R-multiple.
+
+        All computed from per-trade pnl on closed trades. Sharpe/Sortino are
+        per-trade (NOT annualized) and meant for relative comparison across
+        time windows, not for benchmarking against external strategies.
+        """
+        from datetime import timedelta
+        import statistics
+
+        with self._get_conn() as conn:
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            rows = conn.execute(
+                """SELECT pnl, risk_amount, timestamp FROM trades
+                   WHERE user_id = ? AND status = 'CLOSED' AND portfolio = ?
+                   AND timestamp >= ? AND pnl IS NOT NULL
+                   ORDER BY timestamp ASC""",
+                (user_id, portfolio, cutoff),
+            ).fetchall()
+
+        if len(rows) < 2:
+            return {"sharpe": 0.0, "sortino": 0.0, "max_drawdown_pct": 0.0, "avg_r_multiple": 0.0}
+
+        pnls = [r["pnl"] for r in rows]
+
+        # Cumulative drawdown — peak-to-trough on running equity curve
+        cumulative = 0.0
+        peak = 0.0
+        max_dd = 0.0
+        for p in pnls:
+            cumulative += p
+            if cumulative > peak:
+                peak = cumulative
+            dd = peak - cumulative
+            if dd > max_dd:
+                max_dd = dd
+        max_dd_pct = (max_dd / peak * 100) if peak > 0 else 0.0
+
+        # Sharpe / Sortino on per-trade returns (not annualized)
+        mean_ret = statistics.mean(pnls)
+        std_all = statistics.stdev(pnls) if len(pnls) > 1 else 0.0
+        losing = [p for p in pnls if p < 0]
+        std_neg = statistics.stdev(losing) if len(losing) > 1 else 0.0
+
+        sharpe = (mean_ret / std_all) if std_all > 0 else 0.0
+        sortino = (mean_ret / std_neg) if std_neg > 0 else 0.0
+
+        # R-multiple: pnl / risk_amount per trade (when risk_amount is recorded)
+        r_mults = [r["pnl"] / r["risk_amount"] for r in rows if r["risk_amount"] and r["risk_amount"] > 0]
+        avg_r = statistics.mean(r_mults) if r_mults else 0.0
+
+        return {
+            "sharpe": round(sharpe, 3),
+            "sortino": round(sortino, 3),
+            "max_drawdown_pct": round(max_dd_pct, 2),
+            "avg_r_multiple": round(avg_r, 2),
+        }
 
     def update_trailing_stop(
         self, trade_id: int, highest_price: float, trailing_stop_price: float, active: bool = True

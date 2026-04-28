@@ -18,3 +18,6 @@ trades.db-shm
 # LLM call logs (potential training data — kept local, not committed)
 logs/
 .last_cycle.txt
+
+# Tunable parameter runtime state — defaults live in utils/tunable_params.py:_SPECS
+tunable_params.json

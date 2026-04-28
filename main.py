@@ -538,6 +538,14 @@ class BotOrchestrator:
         except Exception as e:
             logger.debug(f"Heartbeat write failed: {e}")
 
+        # Daily strategy snapshot: idempotent, only writes today's record once.
+        try:
+            from utils.snapshot_writer import maybe_write_daily_snapshot
+            portfolios = ("main", "penny") if self.config.PENNY_ENABLED else ("main",)
+            maybe_write_daily_snapshot(self.db, active_users, portfolios=portfolios)
+        except Exception as e:
+            logger.debug(f"Daily snapshot write failed: {e}")
+
     def _check_exits_only(self) -> None:
         """Fast per-user exit check — only price checks on open positions."""
         keys = self._pick_service_keys()
