@@ -199,9 +199,14 @@ class DeepThinkTrader:
 
         for idx, ticker in enumerate(tickers):
             try:
-                # Step 1: Research — priority by list position (top 5 burn full budget,
-                # next 20 rotate 3 sources, tail uses cheapest source only).
-                if idx < 5:
+                # Step 1: Research — priority by list position.
+                #   very_high (top 3): all sources including Marketaux (paid-tier-tight)
+                #   high      (4-5):   all sources except Marketaux (free-tier safe)
+                #   medium    (6-25):  rotate 3 sources, no Marketaux
+                #   low       (tail):  TickerTick only
+                if idx < 3:
+                    news_priority = "very_high"
+                elif idx < 5:
                     news_priority = "high"
                 elif idx < 25:
                     news_priority = "medium"

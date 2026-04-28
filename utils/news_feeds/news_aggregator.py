@@ -57,21 +57,29 @@ class NewsAggregator:
     def _select_sources(self, priority: str) -> list[NewsSource]:
         """Select sources based on ticker priority to stay within budget.
 
-        high   = all enabled sources (top 5 tickers from scanner)
-        medium = rotate through 3 sources (next 20 tickers)
-        low    = TickerTick only (remaining tickers, cheapest source)
+        very_high = all enabled sources incl. Marketaux (top 3 tickers)
+        high      = all sources EXCEPT Marketaux (tickers 4-5)
+        medium    = rotate through 3 non-Marketaux sources (tickers 6-25)
+        low       = TickerTick only (tail)
+
+        Marketaux is gated tighter than other sources because its free-tier
+        cap is 100 calls/day; top-3 × ~26 cycles = 78/day stays under cap.
         """
         available = [s for s in _ROTATION_ORDER if s in self.clients]
         if not available:
             return []
 
-        if priority == "high":
+        if priority == "very_high":
             return available
 
-        # Marketaux free tier = 100 req/day. Restrict to high-priority tickers only.
+        # Marketaux free tier = 100 req/day. Strip Marketaux from anything
+        # below very_high so we stay under the daily cap.
         available = [s for s in available if s != NewsSource.MARKETAUX]
         if not available:
             return []
+
+        if priority == "high":
+            return available
 
         if priority == "low":
             if NewsSource.TICKER_TICK in self.clients:

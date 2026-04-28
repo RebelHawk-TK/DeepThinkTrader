@@ -538,7 +538,7 @@ class DeepThinkAgent:
         debate_eligible = (
             self.debate_engine is not None
             and action != "HOLD"
-            and news_priority == "high"
+            and news_priority in ("very_high", "high")
         )
         if debate_eligible:
             with time_stage(ticker, news_priority, "debate"):
@@ -578,7 +578,7 @@ class DeepThinkAgent:
         # Gated to high+medium priority. Low-priority tickers stay rules-only.
         # Cache by ticker so multi-user cycles reuse one API call.
         claude_analysis = {}
-        claude_eligible = self.claude.enabled and news_priority in ("high", "medium")
+        claude_eligible = self.claude.enabled and news_priority in ("very_high", "high", "medium")
         if claude_eligible:
             with time_stage(ticker, news_priority, "claude_analyst"):
                 cached_claude = claude_cache().get(ticker)
