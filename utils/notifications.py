@@ -30,8 +30,23 @@ def _mark_sent(event_type: str) -> None:
     _last_sent[event_type] = time.time()
 
 
+_ALLOWED_SLACK_HOSTS = {"hooks.slack.com", "hooks.enterprise.slack.com"}
+
+
 def _post_slack(webhook_url: str, text: str, blocks: list[dict] | None = None) -> None:
-    """POST to Slack webhook in a background thread. Never blocks the caller."""
+    """POST to Slack webhook in a background thread. Never blocks the caller.
+
+    Validates the URL host to prevent SSRF in case the webhook URL ever comes
+    from an untrusted source (DB, API, env override).
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse(webhook_url)
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_SLACK_HOSTS:
+        logger.warning(
+            f"Refusing Slack POST to non-Slack URL: scheme={parsed.scheme} "
+            f"host={parsed.hostname}"
+        )
+        return
     payload: dict = {"text": text}
     if blocks:
         payload["blocks"] = blocks

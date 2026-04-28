@@ -90,9 +90,13 @@ def mark_outcome(
 
 
 def _append(record: dict) -> None:
+    import os as _os
     try:
-        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        is_new = not _LOG_PATH.exists()
         with open(_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if is_new:
+            _os.chmod(_LOG_PATH, 0o600)
     except Exception as e:
         logger.debug(f"decision_log write failed: {e}")

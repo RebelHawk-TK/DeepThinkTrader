@@ -53,8 +53,9 @@ def log_call(
     error: str | None = None,
 ) -> None:
     """Append one record to the LLM call log. Never raises."""
+    import os as _os
     try:
-        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         record = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "source": source,
@@ -67,7 +68,10 @@ def log_call(
             "stop_reason": getattr(response, "stop_reason", None) if response is not None else None,
             "error": error,
         }
+        is_new = not _LOG_PATH.exists()
         with open(_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if is_new:
+            _os.chmod(_LOG_PATH, 0o600)
     except Exception as e:
         logger.debug(f"llm_logger write failed: {e}")

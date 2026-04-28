@@ -29,8 +29,9 @@ def log_param_change(
     rationale: str | None = None,
 ) -> None:
     """Append one audit record. Never raises."""
+    import os as _os
     try:
-        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         record = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "param": param,
@@ -39,7 +40,10 @@ def log_param_change(
             "source": source,
             "rationale": rationale,
         }
+        is_new = not _LOG_PATH.exists()
         with open(_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if is_new:
+            _os.chmod(_LOG_PATH, 0o600)
     except Exception as e:
         logger.debug(f"change_log write failed: {e}")

@@ -108,9 +108,11 @@ def maybe_write_digest() -> bool:
             lines.append(f"get_tunable_params().set({r.param!r}, {r.proposed})")
         lines.append("```")
 
+    import os as _os
     try:
-        _LOG_DIR.mkdir(parents=True, exist_ok=True)
+        _LOG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         path.write_text("\n".join(lines), encoding="utf-8")
+        _os.chmod(path, 0o600)
         logger.info(f"digest: wrote {path}")
         # Also log recommendations to decision_log for telemetry
         try:

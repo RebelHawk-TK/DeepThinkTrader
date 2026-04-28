@@ -24,15 +24,34 @@ _PROJECT = os.getenv("GCP_PROJECT", "travelforge-app")
 
 @lru_cache(maxsize=1)
 def _fernet():
-    """Load the Fernet key from Secret Manager (or FERNET_KEY env for local dev)."""
+    """Load the Fernet key. Lookup order:
+      1. macOS Keychain (com.deepthinktrader / fernet-key) — local single-user
+      2. FERNET_KEY env var — backward compat + Cloud Run / Docker
+      3. GCP Secret Manager — multi-tenant cloud (currently unused)
+    """
     from cryptography.fernet import Fernet
 
+    # 1. Keychain (preferred for local Mac install)
+    if os.getenv("DISABLE_KEYCHAIN") != "1":
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", "com.deepthinktrader",
+                 "-a", "fernet-key", "-w"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return Fernet(result.stdout.strip().encode())
+        except Exception as e:
+            logger.debug(f"Keychain Fernet lookup failed: {e}")
+
+    # 2. Env var fallback
     env_key = os.getenv("FERNET_KEY")
     if env_key:
         return Fernet(env_key.encode())
 
+    # 3. GCP Secret Manager (cloud only)
     from google.cloud import secretmanager
-
     client = secretmanager.SecretManagerServiceClient()
     name = f"projects/{_PROJECT}/secrets/{_SECRET_NAME}/versions/latest"
     resp = client.access_secret_version(name=name)

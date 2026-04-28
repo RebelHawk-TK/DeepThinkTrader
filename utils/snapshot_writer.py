@@ -86,8 +86,9 @@ def maybe_write_daily_snapshot(db, user_ids: list[int], portfolios: tuple[str, .
     written = 0
     params = _params_in_use()
 
+    import os as _os
     try:
-        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _LOG_PATH.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     except Exception as e:
         logger.warning(f"Could not create logs dir: {e}")
         return 0
@@ -108,8 +109,11 @@ def maybe_write_daily_snapshot(db, user_ids: list[int], portfolios: tuple[str, .
                     "params": params,
                     "metrics": metrics,
                 }
+                is_new = not _LOG_PATH.exists()
                 with open(_LOG_PATH, "a", encoding="utf-8") as f:
                     f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                if is_new:
+                    _os.chmod(_LOG_PATH, 0o600)
                 written += 1
             except Exception as e:
                 logger.error(f"Snapshot write failed for user={uid} portfolio={portfolio}: {e}")

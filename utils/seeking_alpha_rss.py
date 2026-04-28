@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET  # XXE-safe drop-in replacement for xml.etree
 from datetime import datetime, timedelta
 
 import requests
