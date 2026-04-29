@@ -827,17 +827,24 @@ if portfolio_hist and portfolio_hist.get("equity"):
 # ──────────────────────────────────────────────
 
 # --- Status banner: bot health | market | regime | alerts -----------
+# Computations stay at page scope so KPI row + later sections can read them.
 _log_path = os.path.join(os.path.dirname(__file__), "deepthinktrader.log")
-_bot_status, _bot_detail = compute_bot_status(_log_path)
 try:
     from utils.market_clock import get_market_clock as _get_clock
     _cs_keys = secrets_vault.get_alpaca_keys(USER_ID)
-    if _cs_keys:
-        _market_label, _market_open = compute_market_state(_get_clock(_cs_keys[0], _cs_keys[1]))
-    else:
-        _market_label, _market_open = "?", False
+    _has_clock_keys = bool(_cs_keys)
 except Exception:
-    _market_label, _market_open = "CLOSED", False
+    _cs_keys = None
+    _has_clock_keys = False
+
+_bot_status, _bot_detail = compute_bot_status(_log_path)
+if _has_clock_keys:
+    try:
+        _market_label, _market_open = compute_market_state(_get_clock(_cs_keys[0], _cs_keys[1]))
+    except Exception:
+        _market_label, _market_open = "CLOSED", False
+else:
+    _market_label, _market_open = "?", False
 _regime = compute_regime(config)
 # True today-only P&L from Alpaca (resets at midnight ET). Falls back to 0
 # if the account response is missing last_equity for any reason.
@@ -858,14 +865,31 @@ _banner_alerts = compute_alerts(
     consecutive_losses=_streak,
     circuit_breaker_active=False,  # Risk_Dashboard page owns the live check
 )
-render_status_banner(
-    bot_status=_bot_status, bot_detail=_bot_detail,
-    market_state=_market_label, market_is_open=_market_open,
-    regime_label=_regime["label"], regime_vol_pct=_regime["vol_pct"],
-    recommended_mode=_regime["recommended_mode"],
-    current_mode=config.TRADE_MODE,
-    alerts=_banner_alerts,
-)
+
+# Render the banner inside a 30s fragment so the time-sensitive parts
+# (market countdown, "last log Xs ago") refresh independent of the heavy
+# main-page rerun (default 5 min). Recomputes bot_status + market_state
+# every fragment run; reuses regime/alerts from outer scope (slow-moving).
+@st.fragment(run_every=30)
+def _render_status_banner_fragment():
+    bs, bd = compute_bot_status(_log_path)
+    if _has_clock_keys:
+        try:
+            ml, mo = compute_market_state(_get_clock(_cs_keys[0], _cs_keys[1]))
+        except Exception:
+            ml, mo = "CLOSED", False
+    else:
+        ml, mo = "?", False
+    render_status_banner(
+        bot_status=bs, bot_detail=bd,
+        market_state=ml, market_is_open=mo,
+        regime_label=_regime["label"], regime_vol_pct=_regime["vol_pct"],
+        recommended_mode=_regime["recommended_mode"],
+        current_mode=config.TRADE_MODE,
+        alerts=_banner_alerts,
+    )
+
+_render_status_banner_fragment()
 
 # --- Primary KPI row: 5 numbers ------------------------------------
 # Pass live equity so the 30-day value updates intraday instead of freezing
