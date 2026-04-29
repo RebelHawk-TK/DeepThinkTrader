@@ -21,3 +21,6 @@ logs/
 
 # Tunable parameter runtime state — defaults live in utils/tunable_params.py:_SPECS
 tunable_params.json
+
+# Bot runtime state (paused_portfolios, last_scan_date) — written every cycle
+.state.json
