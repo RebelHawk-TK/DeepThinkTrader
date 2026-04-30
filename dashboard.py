@@ -171,78 +171,17 @@ if _ticker_items:
     """, unsafe_allow_html=True)
 
 
-# Live clock — runs in browser via JavaScript, syncs to local system time
-import streamlit.components.v1 as _components
-_components.html("""
-<div id="clock-bar" style="
-    display: flex; justify-content: space-between; align-items: center;
-    background: #1a1a2e; border-radius: 6px; padding: 6px 16px; margin-bottom: 8px;
-    font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px;
-">
-    <span id="local-time" style="color: #e0e0e0;"></span>
-    <span id="market-status" style="font-weight: 600;"></span>
-    <span id="et-time" style="color: #e0e0e0;"></span>
-</div>
-<script>
-function updateClock() {
-    const now = new Date();
-    const local = now.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:true});
-    const localDate = now.toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'});
-    document.getElementById('local-time').innerHTML = '🕐 ' + localDate + ' ' + local;
-
-    const et = new Date(now.toLocaleString('en-US', {timeZone: 'America/New_York'}));
-    const etTime = et.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:true});
-    document.getElementById('et-time').innerHTML = 'ET: ' + etTime;
-
-    const h = et.getHours(), m = et.getMinutes(), day = et.getDay();
-    const mins = h * 60 + m;
-    const isWeekday = day >= 1 && day <= 5;
-    const isOpen = isWeekday && mins >= 570 && mins < 960; // 9:30-16:00
-
-    const statusEl = document.getElementById('market-status');
-    if (isOpen) {
-        const minsLeft = 960 - mins;
-        const hLeft = Math.floor(minsLeft / 60);
-        const mLeft = minsLeft % 60;
-        statusEl.innerHTML = '🟢 MARKET OPEN — ' + hLeft + 'h ' + mLeft + 'm left';
-        statusEl.style.color = '#4caf50';
-    } else {
-        let nextOpen;
-        if (!isWeekday || mins >= 960) {
-            let daysUntil = 1;
-            let next = new Date(et);
-            next.setDate(next.getDate() + 1);
-            while (next.getDay() === 0 || next.getDay() === 6) { next.setDate(next.getDate() + 1); daysUntil++; }
-            nextOpen = daysUntil === 1 ? 'tomorrow' : daysUntil + ' days';
-        } else {
-            const minsUntil = 570 - mins;
-            const hU = Math.floor(minsUntil / 60);
-            const mU = minsUntil % 60;
-            nextOpen = hU + 'h ' + mU + 'm';
-        }
-        statusEl.innerHTML = '🔴 MARKET CLOSED — opens in ' + nextOpen;
-        statusEl.style.color = '#f44336';
-    }
-}
-updateClock();
-setInterval(updateClock, 1000);
-</script>
-""", height=40)
-
-# Branded header
-st.markdown("""
-<div style="display:flex; align-items:center; gap:16px; margin-bottom:4px;">
-    <span style="font-size:2rem;">📈</span>
-    <div>
-        <div style="font-size:1.8rem; font-weight:800; color:#ccd6f6; letter-spacing:-0.5px;">
-            DeepThinkTrader
-        </div>
-        <div style="font-size:0.85rem; color:#8892b0; font-style:italic;">
-            Trade with conviction, not emotion.
-        </div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+# Compact branded header — single line, no JS clock bar (status banner below
+# already shows market state with countdown). Cuts ~80px of vertical chrome
+# from above-the-fold per UX cleanup pass.
+st.markdown(
+    "<div style='display:flex;align-items:baseline;gap:10px;margin-bottom:6px;'>"
+    "<span style='font-size:1.3rem;font-weight:700;color:#ccd6f6;letter-spacing:-0.3px;'>"
+    "📈 DeepThinkTrader</span>"
+    "<span style='font-size:0.8rem;color:#7D8590;'>· Trade with conviction, not emotion.</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
 
 YAHOO_URL = "https://finance.yahoo.com/quote"
 
