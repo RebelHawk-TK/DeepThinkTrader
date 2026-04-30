@@ -458,6 +458,31 @@ class DeepThinkAgent:
             max_risk = self.config.MAX_RISK_PER_TRADE
             min_conv = self.config.MIN_CONVICTION
 
+        # Regime-conditional thresholds: adapt the entry bar to volatility.
+        # Calm markets reward modest edges; panic markets demand more.
+        # Conservative deltas — never relax by more than 0.5 conviction or
+        # require more than 3/3 edges. VIX is already in the research report.
+        base_min_conv = min_conv
+        base_min_edges = self.config.MIN_EDGES_REQUIRED
+        regime_data = report.get("market_regime", {}) or {}
+        vix = regime_data.get("vix", 0) or 0
+        regime_min_edges = base_min_edges
+        if vix and vix < 15:
+            min_conv = max(1.0, base_min_conv - 0.5)
+            regime_label = "low-vol"
+        elif vix and vix > 25:
+            min_conv = min(10.0, base_min_conv + 1.0)
+            regime_min_edges = min(3, base_min_edges + 1)
+            regime_label = "high-vol"
+        else:
+            regime_label = "normal" if vix else "unknown"
+        if min_conv != base_min_conv or regime_min_edges != base_min_edges:
+            logger.info(
+                f"Regime adjustment for {ticker} (VIX={vix:.1f}, {regime_label}): "
+                f"conviction {base_min_conv}→{min_conv}, "
+                f"edges {base_min_edges}→{regime_min_edges}"
+            )
+
         # Use math.ceil to ensure take_profit always meets the R:R ratio after rounding
         import math
         take_profit_pct = math.ceil(stop_loss_pct * min_rr * 10) / 10
@@ -491,6 +516,25 @@ class DeepThinkAgent:
                     "strength": 4,
                 })
 
+        # Multi-timeframe confirmation: 1-hour trend either confirms or
+        # contradicts the daily catalyst direction. Modest ±0.5 conviction
+        # nudge — meant to break ties on borderline setups, not flip them.
+        intraday = report.get("intraday", {}) or {}
+        if intraday.get("available"):
+            tf_trend = intraday.get("trend", "neutral")
+            if catalyst > 0 and tf_trend == "bullish":
+                conviction = min(10, conviction + 0.5)
+                logger.info(f"1h confirms daily bullish for {ticker} (rsi_1h={intraday.get('rsi_1h')}) → +0.5 conviction")
+            elif catalyst > 0 and tf_trend == "bearish":
+                conviction = max(1, conviction - 0.5)
+                logger.info(f"1h contradicts daily bullish for {ticker} (rsi_1h={intraday.get('rsi_1h')}) → -0.5 conviction")
+            elif catalyst < 0 and tf_trend == "bearish":
+                conviction = min(10, conviction + 0.5)
+                logger.info(f"1h confirms daily bearish for {ticker} → +0.5 conviction")
+            elif catalyst < 0 and tf_trend == "bullish":
+                conviction = max(1, conviction - 0.5)
+                logger.info(f"1h contradicts daily bearish for {ticker} → -0.5 conviction")
+
         # Phase 8b: Adjust conviction based on historical edge combo performance
         combo_parts = []
         for e in edge_details:
@@ -515,10 +559,10 @@ class DeepThinkAgent:
                     f"conviction penalized -{penalty}"
                 )
 
-        # Step 7: Decision — require at least MIN_EDGES_REQUIRED edges
-        if edges_firing < self.config.MIN_EDGES_REQUIRED:
+        # Step 7: Decision — require at least regime-adjusted edges count
+        if edges_firing < regime_min_edges:
             action = "HOLD"
-            edge_reason = f"Only {edges_firing}/{self.config.MIN_EDGES_REQUIRED} edges firing"
+            edge_reason = f"Only {edges_firing}/{regime_min_edges} edges firing"
         elif conviction >= min_conv and catalyst > 0:
             action = "BUY"
             edge_reason = f"{edges_firing}/3 edges confirmed"

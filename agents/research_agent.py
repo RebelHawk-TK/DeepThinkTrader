@@ -203,6 +203,46 @@ class ResearchAgent:
             "themes": themes if themes else ["low Reddit activity"],
         }
 
+    def _fetch_intraday_trend(self, ticker: str) -> dict:
+        """Fetch 1-hour bars for the past 5 trading days and classify trend.
+
+        Returns {"available": bool, "trend": "bullish"|"bearish"|"neutral",
+                 "above_sma_1h": bool, "rsi_1h": float, "n_bars": int}.
+
+        Used by DeepThinkAgent as a confirmation modifier — if 1h trend
+        agrees with the daily catalyst direction, conviction nudges up;
+        if they disagree, conviction is docked. Failures default to
+        neutral (no effect on decisions).
+        """
+        try:
+            bars = self.alpaca_data.get_bars(ticker, timeframe="1Hour", days=7)
+            if bars.empty or len(bars) < 10:
+                return {"available": False, "trend": "neutral",
+                        "above_sma_1h": False, "rsi_1h": 50.0, "n_bars": len(bars)}
+            closes = bars["close"]
+            sma = closes.tail(10).mean()
+            current = float(closes.iloc[-1])
+            above_sma = current > float(sma)
+            # Simple RSI(14) on 1h bars
+            delta = closes.diff()
+            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss.replace(0, 1e-9)
+            rsi_1h = float((100 - (100 / (1 + rs))).iloc[-1]) if not rs.empty else 50.0
+            # Trend: above sma + rsi > 55 = bullish; below sma + rsi < 45 = bearish
+            if above_sma and rsi_1h > 55:
+                trend = "bullish"
+            elif (not above_sma) and rsi_1h < 45:
+                trend = "bearish"
+            else:
+                trend = "neutral"
+            return {"available": True, "trend": trend, "above_sma_1h": above_sma,
+                    "rsi_1h": round(rsi_1h, 1), "n_bars": len(bars)}
+        except Exception as e:
+            logger.debug(f"Intraday fetch failed for {ticker}: {e}")
+            return {"available": False, "trend": "neutral",
+                    "above_sma_1h": False, "rsi_1h": 50.0, "n_bars": 0}
+
     def fetch_technicals(self, ticker: str) -> dict:
         """Fetch technicals via Alpaca Market Data API (primary), yfinance (fallback).
 
@@ -370,6 +410,7 @@ class ResearchAgent:
 
         reddit = self.fetch_reddit_sentiment(ticker)
         technicals = self.fetch_technicals(ticker)
+        intraday = self._fetch_intraday_trend(ticker)
 
         # Fetch advanced technicals from Twelve Data
         advanced_technicals = {}
@@ -721,6 +762,7 @@ class ResearchAgent:
             },
             "reddit_data": reddit,
             "technicals": technicals,
+            "intraday": intraday,
             "advanced_technicals": advanced_technicals,
             "fundamentals": fundamentals,
             "seeking_alpha": sa_intel,
