@@ -218,6 +218,14 @@ def _user_alpaca_headers(user_id: int) -> dict | None:
     return {"APCA-API-KEY-ID": keys[0], "APCA-API-SECRET-KEY": keys[1]}
 
 
+# Module-level shorthand for the signed-in user's Alpaca headers. A handful of
+# legacy callers (`get_spy_history`, `_get_portfolio_history_period`) reference
+# `ALPACA_HEADERS` directly; without this they raise NameError, get caught by
+# `except Exception:` swallowers, and the benchmarks chart falls back to
+# "Portfolio history or benchmark data unavailable" forever.
+ALPACA_HEADERS = _user_alpaca_headers(USER_ID) or {}
+
+
 # ──────────────────────────────────────────────
 # Data fetchers (user_id in cache key = per-user cache)
 # ──────────────────────────────────────────────
