@@ -285,9 +285,11 @@ def get_portfolio_history(user_id: int):
                 prev_eq = None
                 for i, e in enumerate(eq):
                     if e and e > 0 and ts[i] >= baseline_ts:
-                        # Skip settlement artifacts: equity drops >40% in one bar
-                        # then recovers (cash-only snapshots between sell/buy cycles)
-                        if prev_eq and e < prev_eq * 0.6:
+                        # Skip settlement artifacts: equity drops >20% in one bar
+                        # then recovers (cash-only snapshots between sell/buy cycles).
+                        # Tightened from 0.6 -> 0.8 after seeing a -17% phantom dip
+                        # on a day with -$51 realized P&L (rapid DGXX cycling).
+                        if prev_eq and e < prev_eq * 0.8:
                             continue
                         fts.append(ts[i])
                         feq.append(e)
@@ -1085,9 +1087,11 @@ def _get_portfolio_history_period(alpaca_period: str):
                 prev_eq = None
                 for i, e in enumerate(eq):
                     if e and e > 0 and ts[i] >= baseline_ts:
-                        # Skip settlement artifacts: equity drops >40% in one bar
-                        # then recovers (cash-only snapshots between sell/buy cycles)
-                        if prev_eq and e < prev_eq * 0.6:
+                        # Skip settlement artifacts: equity drops >20% in one bar
+                        # then recovers (cash-only snapshots between sell/buy cycles).
+                        # Tightened from 0.6 -> 0.8 after seeing a -17% phantom dip
+                        # on a day with -$51 realized P&L (rapid DGXX cycling).
+                        if prev_eq and e < prev_eq * 0.8:
                             continue
                         fts.append(ts[i])
                         feq.append(e)
