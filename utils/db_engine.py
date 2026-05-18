@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import sqlite3
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -40,11 +41,29 @@ def is_sqlite() -> bool:
 
 
 def _sqlite_conn(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA busy_timeout=15000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    # Retry on "unable to open database file" — Syncthing briefly grabs the
+    # file during sync, causing transient open failures at boot. Backs off
+    # 100ms, 250ms, 500ms, 1s, 2s before giving up. Other OperationalErrors
+    # (locked, corrupt, etc.) propagate immediately.
+    delays = (0.1, 0.25, 0.5, 1.0, 2.0)
+    last_err: sqlite3.OperationalError | None = None
+    for attempt, delay in enumerate((0.0, *delays)):
+        if delay:
+            time.sleep(delay)
+        try:
+            conn = sqlite3.connect(db_path)
+            if attempt > 0:
+                logger.info(f"sqlite open succeeded on retry {attempt} ({db_path})")
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=15000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            return conn
+        except sqlite3.OperationalError as e:
+            if "unable to open database file" not in str(e):
+                raise
+            last_err = e
+            logger.warning(f"sqlite open attempt {attempt} failed ({db_path}): {e}")
+    raise last_err  # type: ignore[misc]
 
 
 # ─────────────────────────────────────────────────────────────────
