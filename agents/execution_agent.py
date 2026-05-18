@@ -314,8 +314,23 @@ class ExecutionAgent:
 
     # ── Main Execute Method ───────────────────────────────────────
 
-    def execute(self, analysis: dict, portfolio: str = "main") -> dict:
-        """Execute a trade based on DeepThink analysis, with full safety checks."""
+    def execute(
+        self,
+        analysis: dict,
+        portfolio: str = "main",
+        is_manual: bool = False,
+        bypass_filters: bool = False,
+    ) -> dict:
+        """Execute a trade based on DeepThink analysis, with full safety checks.
+
+        ``is_manual`` tags the trade row with ``source='MANUAL'`` and skips
+        the revenge-trade guard. ``bypass_filters`` separately controls
+        whether the 10 signal-quality validate_trade checks are bypassed;
+        the 6 account-protection checks (daily loss, position count, no
+        duplicate, market open, drawdown halt, risk of ruin) always run.
+        If ``analysis['proposed_shares']`` is set, that share count is used
+        directly instead of being computed from stop-loss + risk budget.
+        """
         ticker = analysis["ticker"]
         action = analysis["action"]
         conviction = analysis["conviction"]
@@ -350,13 +365,19 @@ class ExecutionAgent:
         # Phase 6c: Get sector for concentration check
         sector = self._get_sector(ticker)
 
-        # Calculate position size first (needed for liquidity check)
-        shares = self.risk_manager.calculate_position_size(
-            account_value=account_value,
-            entry_price=current_price,
-            stop_loss_pct=stop_loss_pct,
-            portfolio=portfolio,
-        )
+        # Calculate position size first (needed for liquidity check). On a
+        # manual trade with an explicit share count, use it verbatim; the user
+        # has already chosen their size.
+        manual_shares = int(analysis.get("proposed_shares") or 0)
+        if (is_manual or bypass_filters) and manual_shares > 0:
+            shares = manual_shares
+        else:
+            shares = self.risk_manager.calculate_position_size(
+                account_value=account_value,
+                entry_price=current_price,
+                stop_loss_pct=stop_loss_pct,
+                portfolio=portfolio,
+            )
 
         # Apply volatility adjustment if ATR data available — uses real historical median
         adv_tech = analysis.get("advanced_technicals", {})
@@ -415,6 +436,7 @@ class ExecutionAgent:
             vix_level=vix_level,
             sector=sector,
             entry_price=current_price,
+            bypass_signal_filters=bypass_filters,
         )
 
         if not validation["approved"]:
@@ -426,8 +448,9 @@ class ExecutionAgent:
                 "failures": validation["failures"],
             }
 
-        # Revenge trading check
-        if self.risk_manager.is_revenge_trading(portfolio=portfolio):
+        # Revenge trading check — manual override skips this (the user is
+        # consciously deciding to take this trade despite recent losses).
+        if not is_manual and self.risk_manager.is_revenge_trading(portfolio=portfolio):
             logger.warning(f"REVENGE TRADING detected — blocking {ticker} trade")
             return {
                 "status": "BLOCKED",
@@ -583,6 +606,7 @@ class ExecutionAgent:
                 "conviction": conviction,
                 "order_id": alpaca_order_id,
                 "reasoning": trade_summary,
+                "source": "MANUAL" if is_manual else "ALGO",
             }
             trade_id = self.db.save_trade(self.user_id, trade_record, portfolio=portfolio)
 
@@ -1328,3 +1352,70 @@ class ExecutionAgent:
                     logger.error(f"Failed to close {ticker}: {e}")
 
         return exits
+
+    # ── Manual close (dashboard-initiated) ─────────────────────────
+
+    def manual_close(self, ticker: str, portfolio: str = "main", note: str = "") -> dict:
+        """Force-flat an open position for ``ticker`` (long or short) and
+        record the close in the trades table with ``exit_reason='MANUAL_CLOSE'``.
+
+        Returns a dict with status/message and (on success) the closed trade
+        id, exit price, and realized P&L. Mirrors the live-exit machinery in
+        ``check_exits`` so trailing-stop/trade-monitor logic remains coherent.
+        """
+        ticker = ticker.upper().strip()
+
+        # Find the open Alpaca position for the realized exit price + P&L
+        positions = {p["ticker"]: p for p in self.get_positions()}
+        if ticker not in positions:
+            return {
+                "status": "ERROR",
+                "ticker": ticker,
+                "message": f"No open Alpaca position for {ticker}.",
+            }
+        pos = positions[ticker]
+        exit_price = pos["current_price"]
+        pnl = pos["unrealized_pnl"]
+
+        # Find the matching open trade row (most recent for ticker+portfolio).
+        open_trades = self.db.get_open_trades(self.user_id, portfolio=portfolio)
+        trade = next((t for t in open_trades if t["ticker"] == ticker), None)
+        if trade is None:
+            return {
+                "status": "ERROR",
+                "ticker": ticker,
+                "message": f"No open DB trade row for {ticker} in {portfolio} portfolio.",
+            }
+
+        reason = "MANUAL_CLOSE"
+        if note:
+            reason = f"MANUAL_CLOSE: {note}"
+
+        try:
+            resp = self._session.delete(f"{self._base_url}/v2/positions/{ticker}")
+            req_id = self._capture_request_id(
+                resp, f"/v2/positions/{ticker}", "DELETE", ticker=ticker
+            )
+            resp.raise_for_status()
+            self.db.close_trade(trade["id"], exit_price, pnl, exit_reason=reason)
+            self.db.update_daily_pnl(self.user_id, pnl, pnl > 0)
+            notify_trade_exited(ticker, reason, pnl)
+            logger.info(
+                f"MANUAL EXIT — {ticker}: {reason} | P&L: ${pnl:.2f} | X-Request-ID: {req_id}"
+            )
+            return {
+                "status": "CLOSED",
+                "ticker": ticker,
+                "trade_id": trade["id"],
+                "exit_price": exit_price,
+                "pnl": pnl,
+                "reason": reason,
+                "message": f"Closed {ticker} @ ${exit_price:.2f}, P&L ${pnl:+.2f}",
+            }
+        except Exception as e:
+            logger.error(f"Manual close failed for {ticker}: {e}")
+            return {
+                "status": "ERROR",
+                "ticker": ticker,
+                "message": f"Close failed: {e}",
+            }

@@ -188,7 +188,8 @@ class Database:
                     edges_fired INTEGER,
                     edge_details TEXT,
                     risk_amount REAL,
-                    sector TEXT
+                    sector TEXT,
+                    source TEXT
                 )
             """)
             conn.execute("""
@@ -262,6 +263,16 @@ class Database:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN user_id INTEGER")
 
         self._migrate_daily_pnl_unique(conn)
+        self._migrate_add_trade_source(conn)
+
+    def _migrate_add_trade_source(self, conn: sqlite3.Connection) -> None:
+        """Add `source` column to trades on DBs that pre-date manual trading."""
+        try:
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(trades)").fetchall()]
+        except sqlite3.OperationalError:
+            return  # table not yet created — CREATE TABLE above includes it
+        if cols and "source" not in cols:
+            conn.execute("ALTER TABLE trades ADD COLUMN source TEXT")
 
     def _migrate_daily_pnl_unique(self, conn: sqlite3.Connection) -> None:
         """Rebuild daily_pnl when it still has UNIQUE(date) instead of
@@ -738,8 +749,8 @@ class Database:
             cursor = conn.execute(
                 """INSERT INTO trades
                    (user_id, ticker, timestamp, action, quantity, entry_price,
-                    stop_loss_price, take_profit_price, conviction, order_id, reasoning, portfolio)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    stop_loss_price, take_profit_price, conviction, order_id, reasoning, portfolio, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     user_id,
                     trade["ticker"],
@@ -753,6 +764,7 @@ class Database:
                     trade.get("order_id"),
                     trade.get("reasoning"),
                     portfolio,
+                    trade.get("source"),
                 ),
             )
             return cursor.lastrowid

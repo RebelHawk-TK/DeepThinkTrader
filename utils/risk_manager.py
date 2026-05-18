@@ -746,38 +746,52 @@ class RiskManager:
         vix_level: float = 0.0,
         sector: str = "",
         entry_price: float = 0.0,
+        bypass_signal_filters: bool = False,
     ) -> dict:
-        """Run all pre-trade safety checks including new risk gates. Returns pass/fail with reasons."""
+        """Run all pre-trade safety checks including new risk gates. Returns pass/fail with reasons.
+
+        When ``bypass_signal_filters`` is True (manual trade override), the
+        12 signal-quality / state-based checks are auto-passed (including
+        the rolling drawdown halt and risk-of-ruin expectancy gates — those
+        protect the algo from itself, not the user's deliberate orders).
+        The 4 hard account-protection checks always run: daily loss kill
+        switch, max-open-position count, no duplicate ticker, market open.
+        """
         params = self._get_params(portfolio)
         entry_value = entry_price * proposed_shares if entry_price > 0 else 0
+        bypass = bypass_signal_filters
         checks = {
-            "warmup_complete": self.check_warmup_complete(),
-            "conviction_met": conviction >= params["min_conviction"],
-            "risk_within_limit": stop_loss_pct <= (params["max_risk_per_trade"] * 100 * 5),
+            "warmup_complete": True if bypass else self.check_warmup_complete(),
+            "conviction_met": True if bypass else conviction >= params["min_conviction"],
+            "risk_within_limit": True if bypass else stop_loss_pct <= (params["max_risk_per_trade"] * 100 * 5),
             "reward_risk_ok": (
-                take_profit_pct / stop_loss_pct >= params["min_reward_risk_ratio"] - 0.01
-                if stop_loss_pct > 0
-                else False
+                True if bypass
+                else (
+                    take_profit_pct / stop_loss_pct >= params["min_reward_risk_ratio"] - 0.01
+                    if stop_loss_pct > 0
+                    else False
+                )
             ),
             "daily_loss_ok": self.check_daily_loss_limit(account_value),
             "position_count_ok": self.check_open_position_count(portfolio=portfolio),
             "no_duplicate": self.check_duplicate_position(ticker),
             "market_open": self.is_market_hours(),
-            # Phase 1c: Portfolio-level guards
-            "drawdown_ok": self.check_drawdown_halt(account_value),
-            "risk_of_ruin_ok": self.check_risk_of_ruin(account_value, portfolio),
+            # Phase 1c: Portfolio-level guards — these protect the algo from
+            # negative-expectancy drift; a deliberate manual order overrides them.
+            "drawdown_ok": True if bypass else self.check_drawdown_halt(account_value),
+            "risk_of_ruin_ok": True if bypass else self.check_risk_of_ruin(account_value, portfolio),
             # Phase 1d: Liquidity
-            "liquidity_ok": self.check_liquidity(proposed_shares, avg_daily_volume) if avg_daily_volume > 0 else True,
+            "liquidity_ok": True if bypass else (self.check_liquidity(proposed_shares, avg_daily_volume) if avg_daily_volume > 0 else True),
             # Phase 3: Edge validation
-            "edges_ok": edges_firing >= self.config.MIN_EDGES_REQUIRED,
+            "edges_ok": True if bypass else edges_firing >= self.config.MIN_EDGES_REQUIRED,
             # Phase 5a: Market circuit breaker (now with VIX)
-            "market_health_ok": self.check_market_health(spy_change_pct, action, vix_level=vix_level),
+            "market_health_ok": True if bypass else self.check_market_health(spy_change_pct, action, vix_level=vix_level),
             # Phase 5b: Earnings awareness
-            "earnings_ok": not self.check_earnings_proximity(ticker)["near_earnings"],
+            "earnings_ok": True if bypass else (not self.check_earnings_proximity(ticker)["near_earnings"]),
             # Phase 6a: Bid-ask spread validation
-            "spread_ok": self.check_spread(spread_pct, portfolio) if spread_pct > 0 else True,
+            "spread_ok": True if bypass else (self.check_spread(spread_pct, portfolio) if spread_pct > 0 else True),
             # Phase 6b: Sector concentration
-            "sector_ok": self.check_sector_concentration(ticker, sector, account_value, entry_value) if sector else True,
+            "sector_ok": True if bypass else (self.check_sector_concentration(ticker, sector, account_value, entry_value) if sector else True),
         }
 
         all_passed = all(checks.values())

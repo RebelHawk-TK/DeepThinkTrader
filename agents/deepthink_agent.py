@@ -472,7 +472,6 @@ class DeepThinkAgent:
             regime_label = "low-vol"
         elif vix and vix > 25:
             min_conv = min(10.0, base_min_conv + 1.0)
-            regime_min_edges = min(3, base_min_edges + 1)
             regime_label = "high-vol"
         else:
             regime_label = "normal" if vix else "unknown"
