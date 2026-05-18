@@ -18,9 +18,9 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
     <key>StandardOutPath</key>
-    <string>/Users/rebelhawk/Documents/Claude/StockTrader/dashboard.log</string>
+    <string>/Users/rebelhawk/Library/Logs/DeepThinkTrader/dashboard_stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/rebelhawk/Documents/Claude/StockTrader/dashboard.log</string>
+    <string>/Users/rebelhawk/Library/Logs/DeepThinkTrader/dashboard_stderr.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
