@@ -44,6 +44,8 @@ class Entry:
     actual_exit_price: float | None
     actual_pnl: float | None
     actual_return_pct: float | None
+    conviction: float = 0.0
+    edge_combo: str = ""
 
 
 def _parse_ts(s: str) -> datetime:
@@ -63,12 +65,14 @@ def load_entries(portfolio: str = "main", limit: int | None = None) -> list[Entr
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     q = """
-        SELECT id, ticker, timestamp, entry_price, stop_loss_price,
-               take_profit_price, exit_price, pnl
-        FROM trades
-        WHERE status='CLOSED' AND action='BUY' AND entry_price > 0
-          AND portfolio = ?
-        ORDER BY id
+        SELECT t.id, t.ticker, t.timestamp, t.entry_price, t.stop_loss_price,
+               t.take_profit_price, t.exit_price, t.pnl, t.conviction,
+               (SELECT edge_combo FROM edge_performance ep
+                WHERE ep.trade_id = t.id LIMIT 1) AS edge_combo
+        FROM trades t
+        WHERE t.status='CLOSED' AND t.action='BUY' AND t.entry_price > 0
+          AND t.portfolio = ?
+        ORDER BY t.id
     """
     rows = conn.execute(q, (portfolio,)).fetchall()
     conn.close()
@@ -87,6 +91,8 @@ def load_entries(portfolio: str = "main", limit: int | None = None) -> list[Entr
             actual_exit_price=exit_px,
             actual_pnl=float(r["pnl"]) if r["pnl"] is not None else None,
             actual_return_pct=ret,
+            conviction=float(r["conviction"]) if r["conviction"] is not None else 0.0,
+            edge_combo=r["edge_combo"] or "",
         ))
     if limit:
         out = out[:limit]
