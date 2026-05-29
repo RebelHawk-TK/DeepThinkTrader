@@ -126,8 +126,10 @@ class RiskManager:
             avg = average_correlation(broker, ticker, held)
             return correlation_size_multiplier(avg)
         except Exception as e:
-            logger.warning(f"Correlation multiplier failed for {ticker}: {e}")
-            return 1.0
+            # Fail-safe: if correlation can't be computed, assume some cluster
+            # risk and downsize rather than sizing at full (fail-open) weight.
+            logger.warning(f"Correlation multiplier failed for {ticker}: {e} — downsizing to 0.5 (fail-safe)")
+            return 0.5
 
     # Bayesian prior for win-rate: beta(alpha, beta) with both = 20.
     # Equivalent to 40 pseudo-trades at 50% win rate. This dominates the
@@ -263,8 +265,13 @@ class RiskManager:
         is too short to evaluate (less scary than blocking on transient errors).
         """
         equity = self._fetch_alpaca_equity_history(days=30)
+        if len(equity) == 0:
+            # Fail-safe: a total fetch failure on an established account means we
+            # are blind to drawdown — block new entries rather than assume safety.
+            logger.warning("DRAWDOWN HALT: could not fetch equity history — blocking new entries (fail-safe)")
+            return False
         if len(equity) < 5:
-            return True  # Not enough history yet, allow trading.
+            return True  # Genuinely short history (new account), allow trading.
 
         peak = max(equity)
         # Use Alpaca's authoritative current equity rather than caller-passed value
@@ -288,9 +295,11 @@ class RiskManager:
 
         RoR ≈ e^(-2 × edge × capital / risk_per_trade). Block if > MAX_RISK_OF_RUIN_PCT.
         """
-        # 2026-05-21: bypassed to increase trade flow; negative-expectancy short-circuit
-        # was blocking MAIN candidates while we have a losing streak. Paper account.
-        return True
+        # 2026-05-29 (P0): re-enabled behind RISK_OF_RUIN_ENABLED (default on).
+        # Was hard-bypassed 2026-05-21 "to increase trade flow during a losing
+        # streak" — which removed the brake exactly when it was needed.
+        if not self.config.RISK_OF_RUIN_ENABLED:
+            return True
         stats = self.db.get_strategy_stats(self.user_id, portfolio)
         if stats["trade_count"] < 20:
             return True  # Not enough data, allow trading
@@ -470,8 +479,10 @@ class RiskManager:
                 )
             return True
         except Exception as e:
-            logger.warning(f"CVaR check failed for {candidate_ticker}: {e}")
-            return True
+            # Fail-safe: block this candidate if its tail-risk can't be evaluated
+            # (was fail-open → True, which let trades through during API errors).
+            logger.warning(f"CVaR check failed for {candidate_ticker}: {e} — blocking candidate (fail-safe)")
+            return False
 
     # ── Phase 6c: Overnight Gap Risk ───────────────────────────
 
@@ -809,9 +820,10 @@ class RiskManager:
 
     def is_revenge_trading(self, portfolio: str = "main") -> bool:
         """Check if recent losses suggest emotional/revenge trading."""
-        # 2026-05-21: bypassed to increase trade flow on PENNY (was blocking nearly
-        # every penny candidate after a multi-day losing streak). Paper account.
-        return False
+        # 2026-05-29 (P0): re-enabled behind REVENGE_GUARD_ENABLED (default on).
+        # Was hard-bypassed 2026-05-21 "to increase trade flow on PENNY".
+        if not self.config.REVENGE_GUARD_ENABLED:
+            return False
         recent = self.db.get_recent_trades(self.user_id, limit=5, portfolio=portfolio)
         if len(recent) < 3:
             return False

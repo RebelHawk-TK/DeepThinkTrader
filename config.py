@@ -161,6 +161,10 @@ class Config:
     MIN_ADV_RATIO: int = int(os.getenv("MIN_ADV_RATIO", "5"))
     KELLY_SAFETY_MULTIPLIER: float = float(os.getenv("KELLY_SAFETY_MULTIPLIER", "0.5"))
     MAX_RISK_OF_RUIN_PCT: float = float(os.getenv("MAX_RISK_OF_RUIN_PCT", "0.01"))
+    # Safety gates re-enabled 2026-05-29 (P0). Default ON. Set to "false" to
+    # restore the prior bypass that allowed trades during a losing streak.
+    RISK_OF_RUIN_ENABLED: bool = os.getenv("RISK_OF_RUIN_ENABLED", "true").lower() == "true"
+    REVENGE_GUARD_ENABLED: bool = os.getenv("REVENGE_GUARD_ENABLED", "true").lower() == "true"
 
     # ── Phase 2: Exit Improvements ────────────────────────────────
     EXIT_CHECK_INTERVAL_MINUTES: int = int(os.getenv("EXIT_CHECK_INTERVAL_MINUTES", "5"))
