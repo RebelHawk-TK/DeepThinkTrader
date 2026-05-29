@@ -177,6 +177,11 @@ class Config:
 
     # ── Phase 3: Edge Validation ──────────────────────────────────
     MIN_EDGES_REQUIRED: int = int(os.getenv("MIN_EDGES_REQUIRED", "2"))
+    # P1 (2026-05-29 edge recalibration): require the fundamental edge on long
+    # entries. Backtest of real entries: fundamental-backed combos were
+    # profitable (PF 1.87); technical-without-fundamental was toxic (T+S: 11%
+    # win, PF 0.10). Default on. Set REQUIRE_FUNDAMENTAL_EDGE=false to revert.
+    REQUIRE_FUNDAMENTAL_EDGE: bool = os.getenv("REQUIRE_FUNDAMENTAL_EDGE", "true").lower() == "true"
 
     # ── Warmup: analyze N unique tickers before first trade ─────
     WARMUP_MIN_TICKERS: int = int(os.getenv("WARMUP_MIN_TICKERS", "100"))

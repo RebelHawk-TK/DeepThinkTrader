@@ -400,6 +400,20 @@ class DeepThinkAgent:
 
         return edges_firing, edges
 
+    @staticmethod
+    def _fundamental_gate(action: str, edge_details: list[dict], *, enabled: bool) -> bool:
+        """True if a long BUY must be blocked for lacking the fundamental edge.
+
+        Longs only — a passing fundamental edge means GOOD fundamentals, which is
+        the wrong sign for a short, so shorts are never gated here.
+        """
+        if not enabled or action != "BUY":
+            return False
+        fund_passed = any(
+            e.get("passed") and e.get("label") == "Fundamental" for e in edge_details
+        )
+        return not fund_passed
+
     def analyze(self, report: dict, portfolio: str = "main", news_priority: str = "medium") -> dict:
         """Run deep-think analysis on a research report.
 
@@ -662,6 +676,16 @@ class DeepThinkAgent:
             if action != "HOLD" and conviction < min_conv:
                 action = "HOLD"
                 edge_reason = f"Conviction dropped below threshold after Claude analysis ({conviction})"
+
+        # P1 (2026-05-29): final require-fundamental-edge guard for LONGS. Applied
+        # after debate/Claude overrides so nothing produces a BUY without a passing
+        # fundamental edge. Backtest: fundamental-backed combos profitable, technical-
+        # without-fundamental toxic. Longs only — good fundamentals are the wrong
+        # sign for a short. Set REQUIRE_FUNDAMENTAL_EDGE=false to revert.
+        if self._fundamental_gate(action, edge_details, enabled=self.config.REQUIRE_FUNDAMENTAL_EDGE):
+            logger.info(f"{ticker}: BUY blocked — no fundamental edge (REQUIRE_FUNDAMENTAL_EDGE)")
+            action = "HOLD"
+            edge_reason = "BUY blocked: fundamental edge required (REQUIRE_FUNDAMENTAL_EDGE)"
 
         # Build reasoning summary
         top_bull = sorted(bullish, key=lambda x: x["strength"], reverse=True)[:2]
