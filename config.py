@@ -221,6 +221,23 @@ class Config:
     NOTIFICATIONS_ENABLED: bool = os.getenv("NOTIFICATIONS_ENABLED", "false").lower() == "true"
     SLACK_WEBHOOK_URL: str = os.getenv("SLACK_WEBHOOK_URL", "")
 
+    # ── Weekend / Pre-market News Sweep ───────────────────────────
+    # Rule-scored news polling at Sat 09:00, Sun 17:00, weekday 08:30 ET. No LLM.
+    # Output: digest in WEEKEND_BRIEF_DIR (and copied to vault), JSON state for Mon hydration,
+    # optional Slack notification on HIGH-tier alerts via existing webhook.
+    WEEKEND_SWEEP_ENABLED: bool = os.getenv("WEEKEND_SWEEP_ENABLED", "true").lower() == "true"
+    WEEKEND_BRIEF_DIR: str = os.getenv(
+        "WEEKEND_BRIEF_DIR",
+        os.path.join(os.path.dirname(__file__), "digests"),
+    )
+    WEEKEND_VAULT_BRIEF_DIR: str = os.getenv(
+        "WEEKEND_VAULT_BRIEF_DIR",
+        os.path.expanduser("~/Documents/TKSabrinaIncVault/02-Projects/StockTrader/digests"),
+    )
+    WEEKEND_HIGH_ALERT_THRESHOLD: float = float(os.getenv("WEEKEND_HIGH_ALERT_THRESHOLD", "7.0"))
+    WEEKEND_HIGH_ALERT_MIN_SOURCES: int = int(os.getenv("WEEKEND_HIGH_ALERT_MIN_SOURCES", "3"))
+    WEEKEND_SLACK_DM: bool = os.getenv("WEEKEND_SLACK_DM", "true").lower() == "true"
+
     # ── Rate Limiting ─────────────────────────────────────────────
     NEWSAPI_DAILY_LIMIT: int = int(os.getenv("NEWSAPI_DAILY_LIMIT", "100"))
 
