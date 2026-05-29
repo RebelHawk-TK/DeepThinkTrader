@@ -64,6 +64,19 @@ class YahooFundamentals:
                 "industry": info.get("industry"),
             }
 
+            # ETF/fund guard (2026-05-29 P0): funds have no equity fundamentals;
+            # the analyst/earnings/insider/institutional modules 404 for them and
+            # flood the logs. Skip those sections for non-equity quote types.
+            quote_type = (info.get("quoteType") or "").upper()
+            if quote_type and quote_type != "EQUITY":
+                result["quote_type"] = quote_type
+                result["is_fund"] = True
+                logger.info(
+                    f"Yahoo fundamentals: {ticker} is {quote_type} — skipping "
+                    "equity-only sections (analyst/earnings/insider/institutional)"
+                )
+                return result
+
             # Analyst recommendations
             result["analyst"] = self._get_analyst_data(stock, info)
 
@@ -231,6 +244,17 @@ class YahooFundamentals:
         try:
             stock = yf.Ticker(ticker)
             info = _yf_with_timeout(lambda: stock.info, default={}) or {}
+
+            # ETF/fund guard (2026-05-29 P0): funds lack equity fundamentals.
+            # Previously the "D/E N/A (pass)" branch handed them a free edge.
+            quote_type = (info.get("quoteType") or "").upper()
+            if quote_type and quote_type != "EQUITY":
+                return {
+                    "passed": False,
+                    "strength": 0,
+                    "details": [f"{quote_type} — fundamentals N/A"],
+                    "label": "Fundamental",
+                }
 
             criteria_met = 0
             details = []

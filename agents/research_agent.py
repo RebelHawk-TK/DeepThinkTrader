@@ -701,6 +701,10 @@ class ResearchAgent:
 
             fins = fundamentals.get("financials", {})
             pe = fins.get("pe_ratio")
+            try:
+                pe = float(pe) if pe is not None else None
+            except (TypeError, ValueError):
+                pe = None  # non-numeric P/E (e.g. "N/A" from a data source) — skip
             if pe and pe > 50:
                 risks.append(f"High P/E ratio ({pe:.0f}) — expensive valuation")
             elif pe and pe < 15 and pe > 0:

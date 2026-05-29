@@ -898,7 +898,7 @@ class ExecutionAgent:
 
         try:
             from utils.alpaca_data import AlpacaMarketData
-            alpaca = AlpacaMarketData(self.db)
+            alpaca = AlpacaMarketData(api_key=self._api_key, secret_key=self._secret_key, db=self.db)
             tech = alpaca.get_technicals(ticker)
             if "error" in tech:
                 return result
@@ -1305,7 +1305,7 @@ class ExecutionAgent:
                         trade["id"], exit_qty, current, partial_pnl, reason, order_data["id"]
                     )
                     self.db.update_trade_quantity(trade["id"], new_qty)
-                    self.db.update_daily_pnl(partial_pnl, partial_pnl > 0)
+                    self.db.update_daily_pnl(self.user_id, partial_pnl, partial_pnl > 0)
 
                     notify_trade_exited(ticker, reason, partial_pnl, partial=True)
                     logger.info(
