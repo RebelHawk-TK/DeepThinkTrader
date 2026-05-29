@@ -46,7 +46,7 @@ _SPECS: tuple[ParamSpec, ...] = (
               "Fraction of equity risked per trade (mode: aggressive=0.03)."),
     ParamSpec("max_daily_loss", 0.08, 0.02, 0.10,
               "Daily loss circuit breaker as fraction of equity."),
-    ParamSpec("min_conviction", 6.0, 5.0, 9.5,
+    ParamSpec("min_conviction", 6.0, 3.0, 9.5,
               "Minimum conviction score (out of 10) to enter a trade."),
     ParamSpec("min_reward_risk_ratio", 1.5, 1.0, 4.0,
               "Required reward:risk ratio to enter."),

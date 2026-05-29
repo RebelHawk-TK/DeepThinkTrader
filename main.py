@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 import os
@@ -9,6 +10,7 @@ import signal
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 import schedule
 
@@ -16,6 +18,7 @@ from agents.deepthink_agent import DeepThinkAgent
 from agents.execution_agent import ExecutionAgent
 from agents.research_agent import ResearchAgent
 from agents.scanner_agent import ScannerAgent
+from agents.weekend_brief import WeekendBrief
 from config import Config
 from utils.database import Database
 from utils.market_clock import get_market_clock
@@ -46,6 +49,7 @@ class DeepThinkTrader:
         state: StateManager,
         dynamic_watchlist: list[str] | None = None,
         last_scan_date: str | None = None,
+        weekend_alerts: dict[str, dict] | None = None,
     ):
         self.config = Config()
         self.db = Database()
@@ -76,6 +80,9 @@ class DeepThinkTrader:
             self._dynamic_watchlist = dynamic_watchlist
         self._paused_portfolios: set[str] = state.paused_portfolios
         self._current_regime = None  # populated by _assess_regime on each cycle
+        # Hydrated by orchestrator from data/last_weekend_brief.json — empty on weekday
+        # cycles after consumption, or if the brief is stale/missing.
+        self._weekend_alerts: dict[str, dict] = weekend_alerts or {}
 
     def _assess_regime(self) -> None:
         """Classify market regime and log it. Visible, not enforced — operator
@@ -217,6 +224,16 @@ class DeepThinkTrader:
                 from utils.cycle_timing import time_stage
                 with time_stage(ticker, news_priority, "research"):
                     report = self.research.generate_report(ticker, news_priority=news_priority)
+
+                # Hydrate from weekend brief — surfaces HIGH-tier signals from
+                # Sat/Sun/pre-market sweep into this cycle's research report.
+                wa = self._weekend_alerts.get(ticker)
+                if wa:
+                    report["weekend_alert"] = wa
+                    logger.info(
+                        f"[WEEKEND HIGH] {ticker}: impact {wa['news_impact']:+.1f} "
+                        f"from {wa['label']} ({wa['generated_at']})"
+                    )
 
                 # Step 2: Deep analysis (priority gates LLM cost — see deepthink_agent.analyze)
                 logger.info(f"--- [{label}] Analyzing {ticker} ---")
@@ -498,6 +515,11 @@ class BotOrchestrator:
 
         logger.info(f"Cycle starting for {len(active_users)} user(s): {active_users}")
 
+        # Pull HIGH-tier alerts from the most recent weekend/pre-market sweep.
+        # Consumed once per cycle — first live cycle after a sweep gets the boost,
+        # subsequent cycles run normally.
+        weekend_alerts = self._load_pending_weekend_alerts()
+
         # Weekly strategy health check runs once per Monday against each user
         run_health = datetime.now().weekday() == 0
 
@@ -522,6 +544,7 @@ class BotOrchestrator:
                     state=self.state,
                     dynamic_watchlist=self._dynamic_watchlist,
                     last_scan_date=self._last_scan_date,
+                    weekend_alerts=weekend_alerts,
                 )
                 if run_health:
                     trader._check_strategy_health()
@@ -545,6 +568,11 @@ class BotOrchestrator:
                 f.write(datetime.now().isoformat())
         except Exception as e:
             logger.debug(f"Heartbeat write failed: {e}")
+
+        # Mark the weekend brief consumed so subsequent cycles don't re-apply
+        # the same HIGH alerts. Only fires when we actually loaded one.
+        if weekend_alerts:
+            self._mark_weekend_brief_consumed()
 
         # Daily strategy snapshot: idempotent, only writes today's record once.
         try:
@@ -591,6 +619,103 @@ class BotOrchestrator:
             except Exception as e:
                 logger.error(f"User {uid} exit check failed: {e}", exc_info=True)
 
+    def _load_pending_weekend_alerts(self) -> dict[str, dict]:
+        """Read data/last_weekend_brief.json and return HIGH-tier alerts.
+
+        Returns {ticker: {label, generated_at, news_impact, top_headlines}}.
+        Empty if file missing, unparseable, stale (>36h), or no HIGH tickers.
+        36h covers Fri-pre-market → Mon-cycle (worst case ~64h, but the
+        Mon 08:30 sweep refreshes it before the 09:30 cycle anyway).
+        """
+        path = Path(os.path.dirname(__file__)) / "data" / "last_weekend_brief.json"
+        if not path.exists():
+            return {}
+        try:
+            result = json.loads(path.read_text())
+        except Exception as e:
+            logger.warning(f"weekend brief load failed: {e}")
+            return {}
+
+        try:
+            gen_dt = datetime.fromisoformat(result.get("generated_at", ""))
+            age_hours = (datetime.now() - gen_dt).total_seconds() / 3600
+        except Exception:
+            return {}
+        if age_hours > 36:
+            logger.info(f"weekend brief stale ({age_hours:.1f}h old) — ignoring")
+            return {}
+
+        label = result.get("label", "")
+        alerts: dict[str, dict] = {}
+        for t in result.get("tickers", []):
+            if t.get("alert_tier") == "HIGH":
+                alerts[t["ticker"]] = {
+                    "label": label,
+                    "generated_at": result.get("generated_at", ""),
+                    "news_impact": t.get("news_impact", 0.0),
+                    "top_headlines": t.get("top_headlines", []),
+                }
+        if alerts:
+            logger.info(
+                f"Hydrating live cycle with {len(alerts)} weekend HIGH alert(s) "
+                f"from {label}: {list(alerts.keys())}"
+            )
+        return alerts
+
+    def _mark_weekend_brief_consumed(self) -> None:
+        """Rename the JSON so it's not re-applied on the next cycle. Idempotent."""
+        base = Path(os.path.dirname(__file__)) / "data"
+        src = base / "last_weekend_brief.json"
+        if not src.exists():
+            return
+        dst = base / "last_weekend_brief.consumed.json"
+        try:
+            if dst.exists():
+                dst.unlink()
+            src.rename(dst)
+            logger.info(f"weekend brief consumed → {dst.name}")
+        except Exception as e:
+            logger.warning(f"weekend brief consume failed: {e}")
+
+    def _weekend_news_sweep(self, label: str) -> None:
+        """Rule-scored news sweep — runs on weekends + weekday pre-market.
+
+        Read-only: builds a digest, writes JSON state for Mon hydration, optionally
+        Slack-alerts on HIGH-tier tickers. Skips entirely if WEEKEND_SWEEP_ENABLED=false.
+        """
+        if not self.config.WEEKEND_SWEEP_ENABLED:
+            return
+
+        active_users = self.db.get_active_user_ids()
+        if not active_users:
+            logger.info(f"weekend sweep [{label}]: no active users, skipping")
+            return
+
+        try:
+            brief = WeekendBrief(db=self.db, config=self.config)
+        except Exception as e:
+            logger.error(f"weekend sweep [{label}]: WeekendBrief init failed: {e}", exc_info=True)
+            return
+
+        for uid in active_users:
+            if not self.db.user_exists(uid):
+                continue
+            try:
+                result = brief.sweep(user_id=uid, label=label)
+                repo_path, vault_path = brief.write_digest(result)
+                state_path = brief.write_state(result)
+                logger.info(f"weekend sweep [{label}] user={uid}: digest={repo_path} "
+                            f"vault={vault_path} state={state_path}")
+                brief.maybe_alert_slack(result)
+            except Exception as e:
+                logger.error(f"weekend sweep [{label}] user={uid} failed: {e}", exc_info=True)
+
+    def _premarket_sweep_if_weekday(self) -> None:
+        """Wrapper so the daily 08:30 schedule.every().day.at() job only fires Mon-Fri."""
+        if datetime.now().weekday() >= 5:  # 5=Sat, 6=Sun
+            return
+        self._weekend_news_sweep("premarket")
+
     def _refresh_sa_emails(self) -> None:
         """Shared Seeking Alpha refresh — emails are global intel, not per-user."""
         keys = self._pick_service_keys()
@@ -631,6 +756,14 @@ class BotOrchestrator:
         self._guarded_cycle()
         schedule.every(interval).minutes.do(self._guarded_cycle)
         schedule.every(exit_interval).minutes.do(self._check_exits_only)
+
+        # Weekend / pre-market news sweep — rule-scored, no LLM. Times are local
+        # (Mac is on America/New_York, so these resolve to ET).
+        if self.config.WEEKEND_SWEEP_ENABLED:
+            schedule.every().saturday.at("09:00").do(self._weekend_news_sweep, "weekend_sat")
+            schedule.every().sunday.at("17:00").do(self._weekend_news_sweep, "weekend_sun")
+            schedule.every().day.at("08:30").do(self._premarket_sweep_if_weekday)
+            logger.info("Weekend sweep: Sat 09:00, Sun 17:00, Mon-Fri 08:30 (ET)")
 
         import threading
         self._last_tick = time.time()

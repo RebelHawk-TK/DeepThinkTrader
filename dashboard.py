@@ -1087,11 +1087,12 @@ def _get_portfolio_history_period(alpaca_period: str):
                 prev_eq = None
                 for i, e in enumerate(eq):
                     if e and e > 0 and ts[i] >= baseline_ts:
-                        # Skip settlement artifacts: equity drops >20% in one bar
-                        # then recovers (cash-only snapshots between sell/buy cycles).
-                        # Tightened from 0.6 -> 0.8 after seeing a -17% phantom dip
-                        # on a day with -$51 realized P&L (rapid DGXX cycling).
-                        if prev_eq and e < prev_eq * 0.8:
+                        # Skip settlement artifacts: equity drops >50% in one bar
+                        # (cash-only snapshots between sell/buy cycles). 2026-05-21:
+                        # loosened from 0.8 -> 0.5 so real drawdowns (e.g. flash-crash
+                        # hours) aren't masked. A -17% phantom will now show as a
+                        # single bar but won't be filtered.
+                        if prev_eq and e < prev_eq * 0.5:
                             continue
                         fts.append(ts[i])
                         feq.append(e)
@@ -1137,10 +1138,12 @@ if _port_hist and _port_hist.get("equity") and benchmark_data:
             st.info("No market-hours data yet for this period.")
         else:
             # Skip leading settlement artifacts: initial cash-only snapshots
-            # before positions are reflected (e.g. $35K cash vs $90K with positions)
+            # before positions are reflected (e.g. $35K cash vs $90K with positions).
+            # 2026-05-21: tightened from 0.6 -> 0.4 so real drawdowns at the start
+            # of the window aren't trimmed; only severe cash-only snapshots are.
             if len(eq) > 2:
                 median_eq = sorted(eq)[len(eq) // 2]
-                while len(eq) > 2 and eq[0] < median_eq * 0.6:
+                while len(eq) > 2 and eq[0] < median_eq * 0.4:
                     eq = eq[1:]
                     bot_dates = bot_dates[1:]
 
@@ -1150,31 +1153,36 @@ if _port_hist and _port_hist.get("equity") and benchmark_data:
             fig_bench = go.Figure()
 
             colors = {"Dow Jones": "#1f77b4", "S&P 500": "#ff7f0e", "Nasdaq": "#2ca02c"}
+            # Re-anchor benchmark to bot's first timestamp so both series share
+            # the same zero point. yfinance's pct_series is already anchored to
+            # its own first bar; that's only the same point as bot's first bar
+            # when no leading bot bars were filtered.
+            bot_start_ts = bot_dates.min()
             for label, pct_series in benchmark_data.items():
-                # For intraday: align by time, not date
-                if _is_intraday and len(pct_series) > 0:
-                    aligned = pct_series - pct_series.iloc[0]
-                    fig_bench.add_trace(go.Scatter(
-                        x=aligned.index,
-                        y=aligned.values,
-                        name=label,
-                        line=dict(color=colors.get(label, "#999"), width=2, dash="dot"),
-                        opacity=0.8,
-                    ))
+                if len(pct_series) == 0:
+                    continue
+                pct_idx = pct_series.index
+                # Normalize tz for comparison with bot_start_ts (US/Eastern)
+                if _is_intraday:
+                    if pct_idx.tz is None:
+                        pct_idx_cmp = pct_idx.tz_localize("US/Eastern")
+                    else:
+                        pct_idx_cmp = pct_idx.tz_convert("US/Eastern")
                 else:
-                    start = bot_dates.min()
-                    pct_mask = pct_series.index >= start
-                    if pct_mask.any():
-                        aligned = pct_series[pct_mask]
-                        if len(aligned) > 0:
-                            aligned = aligned - aligned.iloc[0]
-                        fig_bench.add_trace(go.Scatter(
-                            x=aligned.index,
-                            y=aligned.values,
-                            name=label,
-                            line=dict(color=colors.get(label, "#999"), width=2, dash="dot"),
-                            opacity=0.8,
-                        ))
+                    pct_idx_cmp = pct_idx
+                pct_mask = pct_idx_cmp >= bot_start_ts
+                if not pct_mask.any():
+                    continue
+                aligned = pct_series[pct_mask]
+                if len(aligned) > 0:
+                    aligned = aligned - aligned.iloc[0]
+                fig_bench.add_trace(go.Scatter(
+                    x=aligned.index,
+                    y=aligned.values,
+                    name=label,
+                    line=dict(color=colors.get(label, "#999"), width=2, dash="dot"),
+                    opacity=0.8,
+                ))
 
             fig_bench.add_trace(go.Scatter(
                 x=bot_dates,
@@ -1202,13 +1210,21 @@ if _port_hist and _port_hist.get("equity") and benchmark_data:
             bcols = st.columns(4)
             bot_return = bot_pct[-1] if bot_pct else 0
             bcols[0].metric("DeepThinkTrader", f"{bot_return:+.2f}%")
+            bot_start_ts = bot_dates.min()
             for i, (label, pct_series) in enumerate(benchmark_data.items()):
                 if i < 3:
-                    if _is_intraday and len(pct_series) > 0:
-                        bench_return = pct_series.iloc[-1] - pct_series.iloc[0]
+                    if len(pct_series) == 0:
+                        bench_return = 0
                     else:
-                        start = bot_dates.min()
-                        pct_mask = pct_series.index >= start
+                        pct_idx = pct_series.index
+                        if _is_intraday:
+                            if pct_idx.tz is None:
+                                pct_idx_cmp = pct_idx.tz_localize("US/Eastern")
+                            else:
+                                pct_idx_cmp = pct_idx.tz_convert("US/Eastern")
+                        else:
+                            pct_idx_cmp = pct_idx
+                        pct_mask = pct_idx_cmp >= bot_start_ts
                         if pct_mask.any():
                             aligned = pct_series[pct_mask]
                             bench_return = (aligned.iloc[-1] - aligned.iloc[0]) if len(aligned) > 0 else 0
@@ -1491,6 +1507,134 @@ else:
     st.info("Daily P&L will populate after first trading day")
 
 st.divider()
+
+# ──────────────────────────────────────────────
+# MANUAL TRADE (admin only)
+# ──────────────────────────────────────────────
+
+if CURRENT_USER.get("role") == "admin":
+    st.markdown('<div class="section-header">Manual Trade</div>', unsafe_allow_html=True)
+    with st.expander("Open or close a position manually", expanded=False):
+        with st.form("manual_trade_form", clear_on_submit=False):
+            mc1, mc2, mc3 = st.columns([1, 1, 1])
+            with mc1:
+                mt_action = st.radio(
+                    "Action", ["BUY", "SELL", "CLOSE"], horizontal=True, key="mt_action",
+                )
+            with mc2:
+                mt_ticker_raw = st.text_input(
+                    "Ticker", value="", placeholder="AAPL", key="mt_ticker",
+                )
+            with mc3:
+                mt_portfolio = st.selectbox(
+                    "Portfolio", ["main", "penny"], key="mt_portfolio",
+                )
+
+            if mt_action in ("BUY", "SELL"):
+                sc1, sc2, sc3 = st.columns(3)
+                with sc1:
+                    mt_shares = st.number_input(
+                        "Shares", min_value=1, value=10, step=1, key="mt_shares",
+                    )
+                with sc2:
+                    mt_stop = st.number_input(
+                        "Stop loss %", min_value=0.1, value=2.0, step=0.1, key="mt_stop",
+                    )
+                with sc3:
+                    mt_tp = st.number_input(
+                        "Take profit %", min_value=0.1, value=4.0, step=0.1, key="mt_tp",
+                    )
+                mt_override = st.checkbox(
+                    "Override signal filters (spread/liquidity/sector/edges/etc.) — "
+                    "account-protection checks still apply",
+                    value=True,
+                    key="mt_override",
+                )
+            else:
+                mt_shares = mt_stop = mt_tp = None
+                mt_override = False
+
+            mt_note = st.text_input("Note (saved with the trade)", value="", key="mt_note")
+            mt_submit = st.form_submit_button(f"Execute {mt_action}")
+
+        if mt_submit:
+            _ticker = (mt_ticker_raw or "").upper().strip()
+            if not _ticker:
+                st.error("Ticker is required.")
+            else:
+                from agents.execution_agent import ExecutionAgent
+                from utils import secrets_vault
+                from utils.database import Database
+
+                _keys = secrets_vault.get_alpaca_keys(USER_ID)
+                if not _keys:
+                    st.error("No Alpaca keys configured for this user.")
+                else:
+                    _ea = ExecutionAgent(
+                        user_id=USER_ID,
+                        api_key=_keys[0],
+                        secret_key=_keys[1],
+                        db=Database(),
+                    )
+                    if mt_action == "CLOSE":
+                        result = _ea.manual_close(
+                            _ticker, portfolio=mt_portfolio, note=mt_note,
+                        )
+                    else:
+                        # Live price from Alpaca snapshot
+                        _price = 0.0
+                        try:
+                            _resp = http_requests.get(
+                                f"https://data.alpaca.markets/v2/stocks/{_ticker}/snapshot",
+                                headers=_user_alpaca_headers(USER_ID) or {},
+                                timeout=5,
+                            )
+                            _resp.raise_for_status()
+                            _snap = _resp.json()
+                            _latest = _snap.get("latestTrade") or {}
+                            _price = float(_latest.get("p") or 0)
+                            if _price <= 0:
+                                _q = _snap.get("latestQuote") or {}
+                                _price = float(_q.get("ap") or _q.get("bp") or 0)
+                        except Exception as _e:
+                            st.warning(f"Live price fetch failed: {_e}")
+
+                        if _price <= 0:
+                            st.error(f"Could not fetch a live price for {_ticker}. Aborting.")
+                            result = None
+                        else:
+                            _analysis = {
+                                "ticker": _ticker,
+                                "action": mt_action,
+                                "conviction": 10.0,
+                                "stop_loss_pct": float(mt_stop),
+                                "take_profit_pct": float(mt_tp),
+                                "current_price": _price,
+                                "edges_firing": 0,
+                                "proposed_shares": int(mt_shares),
+                                "reasoning": f"MANUAL ({mt_action}): {mt_note or 'no note'}",
+                            }
+                            result = _ea.execute(
+                                _analysis,
+                                portfolio=mt_portfolio,
+                                is_manual=True,
+                                bypass_filters=bool(mt_override),
+                            )
+
+                    if result is not None:
+                        _status = result.get("status")
+                        if _status in ("OPEN", "EXECUTED", "CLOSED") or result.get("trade_id"):
+                            st.success(result.get("message") or f"OK — {_status}")
+                        elif _status == "BLOCKED":
+                            st.warning(f"Blocked: {result.get('message')}")
+                            if result.get("failures"):
+                                st.caption("Failed checks: " + ", ".join(result["failures"]))
+                        else:
+                            st.error(result.get("message") or f"Error: {result}")
+                        with st.expander("Full result", expanded=False):
+                            st.json(result)
+
+    st.divider()
 
 # ──────────────────────────────────────────────
 # LIVE POSITIONS

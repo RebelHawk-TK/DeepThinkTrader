@@ -149,3 +149,18 @@ def notify_daily_loss_limit(loss_pct: float, limit_pct: float) -> None:
 
 def notify_system_event(message: str) -> None:
     _send("SYSTEM_EVENT", f"DeepThinkTrader: {message}")
+
+
+def notify_weekend_high_alert(ticker: str, news_impact: float, top_headlines: list[str]) -> None:
+    """Posted by weekend/pre-market sweep when a watchlist ticker crosses the HIGH threshold.
+
+    Goes to whatever channel SLACK_WEBHOOK_URL points at — route the webhook to a
+    private channel for DM-style delivery.
+    """
+    direction = "+" if news_impact > 0 else ""
+    headline_lines = "\n".join(f"• {h}" for h in top_headlines[:3])
+    text = (
+        f"Weekend HIGH alert — {ticker} ({direction}{news_impact:.1f} news impact)\n"
+        f"{headline_lines}"
+    )
+    _send(f"WEEKEND_ALERT_{ticker}", text)
