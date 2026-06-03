@@ -144,7 +144,9 @@ class Config:
     # ── Penny Stock Portfolio Parameters ──────────────────────────
     PENNY_MAX_RISK_PER_TRADE: float = float(os.getenv("PENNY_MAX_RISK_PER_TRADE", "0.03"))
     PENNY_MAX_DAILY_LOSS: float = float(os.getenv("PENNY_MAX_DAILY_LOSS", "0.08"))
-    PENNY_MIN_CONVICTION: float = float(os.getenv("PENNY_MIN_CONVICTION", "6.0"))
+    # 2026-06-03: penny min conviction 6.0 -> 7.0. Backtest (candidate_config):
+    # penny's best filter is S-edge & conv>=7 (PF 1.31). Pairs with REQUIRE_SENTIMENT_EDGE_PENNY.
+    PENNY_MIN_CONVICTION: float = float(os.getenv("PENNY_MIN_CONVICTION", "7.0"))
     PENNY_MIN_REWARD_RISK_RATIO: float = float(os.getenv("PENNY_MIN_REWARD_RISK_RATIO", "1.5"))
     PENNY_MAX_POSITION_PCT: float = float(os.getenv("PENNY_MAX_POSITION_PCT", "0.02"))
     PENNY_MAX_OPEN_POSITIONS: int = int(os.getenv("PENNY_MAX_OPEN_POSITIONS", "5"))
@@ -170,7 +172,11 @@ class Config:
     EXIT_CHECK_INTERVAL_MINUTES: int = int(os.getenv("EXIT_CHECK_INTERVAL_MINUTES", "5"))
     TRAILING_STOP_ACTIVATION_PCT: float = float(os.getenv("TRAILING_STOP_ACTIVATION_PCT", "2.0"))
     TRAILING_STOP_DISTANCE_PCT: float = float(os.getenv("TRAILING_STOP_DISTANCE_PCT", "1.5"))
-    PENNY_TRAILING_STOP_DISTANCE_PCT: float = float(os.getenv("PENNY_TRAILING_STOP_DISTANCE_PCT", "3.0"))
+    # 2026-06-03: penny trailing tightened 3.0 -> 2.0. backtest.candidate_config on
+    # the bot's real penny entries: trail 2.0 lifts PF 1.32 -> 1.49 and R:R 3.14 -> 4.33
+    # vs the live 3.0 (penny names spike & revert fast — grab the move). Held >= the
+    # ~2% penny spread (PENNY_MAX_SPREAD_PCT) to limit whipsaw; widen if it appears live.
+    PENNY_TRAILING_STOP_DISTANCE_PCT: float = float(os.getenv("PENNY_TRAILING_STOP_DISTANCE_PCT", "2.0"))
     SCALE_OUT_ENABLED: bool = os.getenv("SCALE_OUT_ENABLED", "true").lower() == "true"
     SCALE_OUT_LEVELS: list[float] = [float(x) for x in os.getenv("SCALE_OUT_LEVELS", "1.0,2.0").split(",")]
     TIME_STOP_DAYS: int = int(os.getenv("TIME_STOP_DAYS", "15"))
@@ -181,7 +187,13 @@ class Config:
     # entries. Backtest of real entries: fundamental-backed combos were
     # profitable (PF 1.87); technical-without-fundamental was toxic (T+S: 11%
     # win, PF 0.10). Default on. Set REQUIRE_FUNDAMENTAL_EDGE=false to revert.
+    # 2026-06-03: applied to the MAIN book only (gated per-portfolio in
+    # deepthink_agent) — requiring fundamentals HURTS the penny book (PF 1.17 < 1.25).
     REQUIRE_FUNDAMENTAL_EDGE: bool = os.getenv("REQUIRE_FUNDAMENTAL_EDGE", "true").lower() == "true"
+    # 2026-06-03: penny-book counterpart — require the SENTIMENT edge on penny longs.
+    # Backtest (candidate_config): penny sentiment combos win (S&conv>=7 PF 1.31,
+    # T+S 1.56, F+T+S 2.04); no-sentiment F+T is toxic (PF 0.02). Set false to revert.
+    REQUIRE_SENTIMENT_EDGE_PENNY: bool = os.getenv("REQUIRE_SENTIMENT_EDGE_PENNY", "true").lower() == "true"
 
     # ── Warmup: analyze N unique tickers before first trade ─────
     WARMUP_MIN_TICKERS: int = int(os.getenv("WARMUP_MIN_TICKERS", "100"))

@@ -414,6 +414,22 @@ class DeepThinkAgent:
         )
         return not fund_passed
 
+    @staticmethod
+    def _sentiment_gate(action: str, edge_details: list[dict], *, enabled: bool) -> bool:
+        """True if a long BUY must be blocked for lacking the sentiment edge.
+
+        Penny-book counterpart to _fundamental_gate. Backtest of real penny
+        entries (backtest.candidate_config): sentiment-backed combos win
+        (S&conv>=7 PF 1.31, T+S 1.56, F+T+S 2.04) while the no-sentiment F+T
+        combo is toxic (PF 0.02). Longs only.
+        """
+        if not enabled or action != "BUY":
+            return False
+        sent_passed = any(
+            e.get("passed") and e.get("label") == "Sentiment" for e in edge_details
+        )
+        return not sent_passed
+
     def analyze(self, report: dict, portfolio: str = "main", news_priority: str = "medium") -> dict:
         """Run deep-think analysis on a research report.
 
@@ -677,12 +693,19 @@ class DeepThinkAgent:
                 action = "HOLD"
                 edge_reason = f"Conviction dropped below threshold after Claude analysis ({conviction})"
 
-        # P1 (2026-05-29): final require-fundamental-edge guard for LONGS. Applied
-        # after debate/Claude overrides so nothing produces a BUY without a passing
-        # fundamental edge. Backtest: fundamental-backed combos profitable, technical-
-        # without-fundamental toxic. Longs only — good fundamentals are the wrong
-        # sign for a short. Set REQUIRE_FUNDAMENTAL_EDGE=false to revert.
-        if self._fundamental_gate(action, edge_details, enabled=self.config.REQUIRE_FUNDAMENTAL_EDGE):
+        # Per-book entry-edge gate for LONGS, applied after debate/Claude overrides
+        # so nothing produces a BUY that fails the book's edge filter. The two books
+        # have OPPOSITE edge profiles in backtest (backtest.candidate_config / entry_filters):
+        #   main  → require FUNDAMENTAL edge (PF 1.32; technical-without-F toxic, T+S PF 0.10)
+        #   penny → require SENTIMENT edge  (PF 1.31; requiring fundamentals HURTS penny, 1.17<1.25)
+        # So fundamental is main-only, sentiment is penny-only. Longs only — good
+        # fundamentals are the wrong sign for a short. Toggle via the two flags.
+        if portfolio == "penny":
+            if self._sentiment_gate(action, edge_details, enabled=self.config.REQUIRE_SENTIMENT_EDGE_PENNY):
+                logger.info(f"{ticker}: BUY blocked — no sentiment edge (penny, REQUIRE_SENTIMENT_EDGE_PENNY)")
+                action = "HOLD"
+                edge_reason = "BUY blocked: sentiment edge required (penny)"
+        elif self._fundamental_gate(action, edge_details, enabled=self.config.REQUIRE_FUNDAMENTAL_EDGE):
             logger.info(f"{ticker}: BUY blocked — no fundamental edge (REQUIRE_FUNDAMENTAL_EDGE)")
             action = "HOLD"
             edge_reason = "BUY blocked: fundamental edge required (REQUIRE_FUNDAMENTAL_EDGE)"
