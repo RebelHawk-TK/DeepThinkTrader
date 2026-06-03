@@ -335,8 +335,9 @@ class DeepThinkTrader:
         if datetime.now().weekday() == 0:
             self._check_strategy_health()
 
-        # Run main portfolio
-        self.run_cycle(portfolio="main")
+        # Run main portfolio if enabled (halted 2026-06-03 — no OOS edge)
+        if self.config.MAIN_ENABLED:
+            self.run_cycle(portfolio="main")
         # Run penny stock portfolio if enabled
         if self.config.PENNY_ENABLED:
             self.run_cycle(portfolio="penny")
@@ -548,7 +549,10 @@ class BotOrchestrator:
                 )
                 if run_health:
                     trader._check_strategy_health()
-                trader.run_cycle(portfolio="main")
+                if self.config.MAIN_ENABLED:
+                    trader.run_cycle(portfolio="main")
+                else:
+                    logger.info("Main book halted (MAIN_ENABLED=false) — new entries skipped; open positions still exit-managed")
                 if self.config.PENNY_ENABLED:
                     trader.run_cycle(portfolio="penny")
                 # Harvest the day's watchlist from the first user so
@@ -577,7 +581,9 @@ class BotOrchestrator:
         # Daily strategy snapshot: idempotent, only writes today's record once.
         try:
             from utils.snapshot_writer import maybe_write_daily_snapshot
-            portfolios = ("main", "penny") if self.config.PENNY_ENABLED else ("main",)
+            portfolios = tuple(
+                p for p, on in (("main", self.config.MAIN_ENABLED), ("penny", self.config.PENNY_ENABLED)) if on
+            )
             maybe_write_daily_snapshot(self.db, active_users, portfolios=portfolios)
         except Exception as e:
             logger.debug(f"Daily snapshot write failed: {e}")

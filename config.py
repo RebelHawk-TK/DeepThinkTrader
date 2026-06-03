@@ -59,6 +59,11 @@ class Config:
     TRADE_MODE: str = os.getenv("TRADE_MODE", "normal").lower()
 
     # Penny stock portfolio: enabled by default, runs alongside main portfolio
+    # Per-book enable flags (default on). MAIN halted 2026-06-03 via .env MAIN_ENABLED=false:
+    # the entry-side walk-forward (backtest.walk_forward_entries) shows no out-of-sample edge
+    # at any cost (PF 0.66 even at zero friction; live -$6,988). Open main positions are still
+    # exit-managed while disabled — only NEW main entries stop. Set MAIN_ENABLED=true to resume.
+    MAIN_ENABLED: bool = os.getenv("MAIN_ENABLED", "true").lower() == "true"
     PENNY_ENABLED: bool = os.getenv("PENNY_ENABLED", "true").lower() == "true"
 
     # Load mode preset, fall back to normal if invalid
