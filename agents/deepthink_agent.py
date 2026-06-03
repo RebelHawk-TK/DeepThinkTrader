@@ -430,6 +430,26 @@ class DeepThinkAgent:
         )
         return not sent_passed
 
+    @staticmethod
+    def _quality_momentum_signal(report: dict) -> bool:
+        """Validated MAIN entry rule (backtest.validate_quality_momentum: OOS PF 1.35,
+        look-ahead-clean): above SMA-20 + revenue_growth>0 + profit_margin>0 + up on the
+        day. A simple quality+momentum factor that beat the conviction stack on the same
+        scanned universe. Used for the main book only when MAIN_SIGNAL=quality_momentum.
+        """
+        t = report.get("technicals") or {}
+        fin = (report.get("fundamentals") or {}).get("financials") or {}
+        rev_growth = fin.get("revenue_growth")
+        margin = fin.get("profit_margin")
+        if rev_growth is None or margin is None:
+            return False
+        return (
+            bool(t.get("above_sma_20"))
+            and (t.get("daily_change_pct") or 0) > 0
+            and rev_growth > 0
+            and margin > 0
+        )
+
     def analyze(self, report: dict, portfolio: str = "main", news_priority: str = "medium") -> dict:
         """Run deep-think analysis on a research report.
 
@@ -487,6 +507,11 @@ class DeepThinkAgent:
             min_rr = self.config.MIN_REWARD_RISK_RATIO
             max_risk = self.config.MAX_RISK_PER_TRADE
             min_conv = self.config.MIN_CONVICTION
+
+        # Quality-momentum signal mode: the main book uses the validated factor rule
+        # instead of the conviction/edge/LLM stack (which has no edge). When on, debate +
+        # Claude + the edge gates are skipped and the action is set by the signal below.
+        signal_mode = portfolio == "main" and self.config.MAIN_SIGNAL == "quality_momentum"
 
         # Regime-conditional thresholds: adapt the entry bar to volatility.
         # Calm markets reward modest edges; panic markets demand more.
@@ -612,6 +637,7 @@ class DeepThinkAgent:
             self.debate_engine is not None
             and action != "HOLD"
             and news_priority in ("very_high", "high")
+            and not signal_mode
         )
         if debate_eligible:
             with time_stage(ticker, news_priority, "debate"):
@@ -651,7 +677,11 @@ class DeepThinkAgent:
         # Gated to high+medium priority. Low-priority tickers stay rules-only.
         # Cache by ticker so multi-user cycles reuse one API call.
         claude_analysis = {}
-        claude_eligible = self.claude.enabled and news_priority in ("very_high", "high", "medium")
+        claude_eligible = (
+            self.claude.enabled
+            and news_priority in ("very_high", "high", "medium")
+            and not signal_mode
+        )
         if claude_eligible:
             with time_stage(ticker, news_priority, "claude_analyst"):
                 cached_claude = claude_cache().get(ticker)
@@ -705,10 +735,23 @@ class DeepThinkAgent:
                 logger.info(f"{ticker}: BUY blocked — no sentiment edge (penny, REQUIRE_SENTIMENT_EDGE_PENNY)")
                 action = "HOLD"
                 edge_reason = "BUY blocked: sentiment edge required (penny)"
-        elif self._fundamental_gate(action, edge_details, enabled=self.config.REQUIRE_FUNDAMENTAL_EDGE):
+        elif not signal_mode and self._fundamental_gate(action, edge_details, enabled=self.config.REQUIRE_FUNDAMENTAL_EDGE):
             logger.info(f"{ticker}: BUY blocked — no fundamental edge (REQUIRE_FUNDAMENTAL_EDGE)")
             action = "HOLD"
             edge_reason = "BUY blocked: fundamental edge required (REQUIRE_FUNDAMENTAL_EDGE)"
+
+        # Quality-momentum signal mode (main): the validated factor REPLACES the conviction/
+        # edge decision above as the entry rule (backtest.validate_quality_momentum OOS PF 1.35).
+        # Risk gates, sizing and exits still apply downstream in the execution agent.
+        if signal_mode:
+            if self._quality_momentum_signal(report):
+                action = "BUY"
+                edge_reason = "quality_momentum: SMA20 + rev_growth>0 + margin>0 + up-day"
+                conviction = max(conviction, base_min_conv)  # let downstream gates pass
+            else:
+                action = "HOLD"
+                edge_reason = "quality_momentum: no signal"
+            logger.info(f"{ticker}: [main quality_momentum] -> {action} (conv {conviction})")
 
         # Build reasoning summary
         top_bull = sorted(bullish, key=lambda x: x["strength"], reverse=True)[:2]
