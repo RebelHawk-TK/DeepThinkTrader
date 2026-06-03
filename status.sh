@@ -78,33 +78,44 @@ fi
 
 echo ""
 
-# Alpaca account
-ACCOUNT=$(python3 -c "
-from config import Config
-import requests
-c = Config()
+# Alpaca account — keys are per-user (encrypted in DB), read via secrets_vault.
+# Must run under the bot's venv so the alpaca SDK + deps import.
+VENV_PY="/Users/rebelhawk/.venvs/deepthinktrader/bin/python3"
+[ -x "$VENV_PY" ] || VENV_PY="python3"
+ACCOUNT=$("$VENV_PY" -c "
+from utils.database import Database
+from utils.secrets_vault import get_alpaca_keys
+from brokers.alpaca import AlpacaBroker
 try:
-    resp = requests.get(f'{c.ALPACA_BASE_URL}/v2/account', headers={
-        'APCA-API-KEY-ID': c.ALPACA_API_KEY,
-        'APCA-API-SECRET-KEY': c.ALPACA_SECRET_KEY,
-    }, timeout=5)
-    if resp.ok:
-        d = resp.json()
-        print(f'OK|{d[\"equity\"]}|{d[\"buying_power\"]}|{d[\"account_number\"]}')
-    else:
-        print(f'ERR|{resp.status_code}')
-except:
-    print('ERR|timeout')
+    uids = Database().get_active_user_ids()
+    if not uids:
+        print('NONE'); raise SystemExit
+    uid = uids[0]
+    keys = get_alpaca_keys(uid)
+    if not keys:
+        print('NOKEYS'); raise SystemExit
+    key_id, secret = keys
+    a = AlpacaBroker(api_key=key_id, secret_key=secret).get_account()
+    print(f'OK|{a.equity}|{a.buying_power}|{a.cash}|{uid}')
+except SystemExit:
+    pass
+except Exception as e:
+    print(f'ERR|{type(e).__name__}')
 " 2>/dev/null)
 
-IFS='|' read -r STATUS EQUITY POWER ACCT <<< "$ACCOUNT"
+IFS='|' read -r STATUS EQUITY POWER CASH ACCT <<< "$ACCOUNT"
 
 if [ "$STATUS" = "OK" ]; then
-    echo -e "  ${CYAN}Alpaca Paper Account:${NC} $ACCT"
+    echo -e "  ${CYAN}Alpaca Paper Account:${NC} user $ACCT"
     printf "    Equity:            \$%'.2f\n" "$EQUITY"
     printf "    Buying Power:      \$%'.2f\n" "$POWER"
+    printf "    Cash:              \$%'.2f\n" "$CASH"
+elif [ "$STATUS" = "NONE" ]; then
+    echo -e "  ${YELLOW}Alpaca: no active users with keys on file${NC}"
+elif [ "$STATUS" = "NOKEYS" ]; then
+    echo -e "  ${YELLOW}Alpaca: active user has no keys on file${NC}"
 else
-    echo -e "  ${RED}Alpaca: Connection failed${NC}"
+    echo -e "  ${RED}Alpaca: Connection failed${NC} ($EQUITY)"
 fi
 
 echo ""

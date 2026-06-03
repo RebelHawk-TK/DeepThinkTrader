@@ -1,3 +1,3 @@
 #!/bin/bash
-cd /Users/rebelhawk/Documents/Claude/StockTrader
+cd /Users/rebelhawk/Projects/StockTrader
 exec /Users/rebelhawk/.venvs/deepthinktrader/bin/python3 main.py

@@ -41,11 +41,15 @@ def is_sqlite() -> bool:
 
 
 def _sqlite_conn(db_path: str) -> sqlite3.Connection:
-    # Retry on "unable to open database file" — Syncthing briefly grabs the
-    # file during sync, causing transient open failures at boot. Backs off
-    # 100ms, 250ms, 500ms, 1s, 2s before giving up. Other OperationalErrors
-    # (locked, corrupt, etc.) propagate immediately.
-    delays = (0.1, 0.25, 0.5, 1.0, 2.0)
+    # Retry on "unable to open database file" (SQLITE_CANTOPEN). The db lives
+    # under ~/Documents, which is TCC-protected on macOS; right after a process
+    # (re)start the launchd agent can be transiently denied access to the
+    # directory before TCC settles, yielding CANTOPEN. The transient clears
+    # within a few seconds, so we back off across ~30s total (100ms → 10s)
+    # before giving up — long enough for one process start to ride it out
+    # instead of crashing and relying on launchd KeepAlive to restart us.
+    # Other OperationalErrors (locked, corrupt, etc.) propagate immediately.
+    delays = (0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 10.0)
     last_err: sqlite3.OperationalError | None = None
     for attempt, delay in enumerate((0.0, *delays)):
         if delay:

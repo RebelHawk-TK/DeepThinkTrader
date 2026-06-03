@@ -28,7 +28,7 @@ from pathlib import Path
 
 from brokers.base import Bar
 
-DB_PATH = Path.home() / "Documents/Claude/StockTrader/trades.db"
+DB_PATH = Path(__file__).resolve().parents[1] / "trades.db"
 
 
 # ── Entry records (the bot's real trades) ────────────────────────────────────
