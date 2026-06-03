@@ -4,6 +4,8 @@
 
 A multi-agent autonomous trading system that enforces institutional-grade risk discipline on every trade. 13 pre-trade safety checks, Kelly-calibrated position sizing, and automated exit management — so you preserve capital first and only enter positions backed by multi-source research and chain-of-thought reasoning.
 
+> **Strategy status (2026-06-03):** the main book (≥ $5) now trades a backtest-validated **quality-momentum factor** (above SMA-20 + revenue growth + profit margin + up-day). The conviction/multi-edge/LLM stack described below was found to have no out-of-sample edge and now drives the **penny** book only. See [`docs/status_2026-06-03.md`](docs/status_2026-06-03.md) for the current per-book logic and the `backtest/` validator suite.
+
 > **WARNING:** DeepThinkTrader is experimental software for educational and research purposes only. It is NOT financial advice. Stock trading involves substantial risk of loss, including the possibility of losing your entire investment. Paper trading results do not reflect real market conditions. Past performance does not predict future results. Always start with paper trading and never risk capital you cannot afford to lose.
 
 ## Why DeepThinkTrader?
