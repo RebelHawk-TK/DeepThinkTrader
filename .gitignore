@@ -24,8 +24,3 @@ tunable_params.json
 
 # Bot runtime state (paused_portfolios, last_scan_date) — written every cycle
 .state.json
-
-# Runtime + stray output — generated, not source
-digests/
-data/
-nanobanana-output/
