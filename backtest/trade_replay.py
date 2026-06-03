@@ -19,11 +19,13 @@ Read-only on trades.db (opened mode=ro). No live state is touched.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sqlite3
 import statistics
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from brokers.base import Bar
@@ -102,18 +104,33 @@ def load_entries(portfolio: str = "main", limit: int | None = None) -> list[Entr
 # ── Hourly bar feed (yfinance, cached per ticker) ────────────────────────────
 
 _bar_cache: dict[str, list[Bar]] = {}
+_CACHE_DIR = os.path.expanduser("~/.cache/deepthinktrader/bars")
+# Wide fetch window so one cached file per ticker serves every decision and script.
+# Covers the backtest era (first decisions 2026-03-23) with buffer.
+_FETCH_START = date(2026, 2, 1)
 
 
-def fetch_hourly_bars(ticker: str, start: datetime, end: datetime) -> list[Bar]:
-    """Hourly OHLCV bars for [start, end], UTC-naive timestamps. Cached per ticker."""
+def _wide_bars(ticker: str) -> list[Bar]:
+    """Full hourly history for a ticker, memoized + disk-cached as JSON so repeat runs
+    are DETERMINISTIC. yfinance revises/varies recent bars and intermittently 404s
+    run-to-run, which made backtest PF wobble; freezing the first successful fetch fixes
+    that. Failed (empty) fetches are NOT cached, so they retry next run."""
     if ticker in _bar_cache:
         return _bar_cache[ticker]
+    path = os.path.join(_CACHE_DIR, f"{ticker.replace('/', '_')}.json")
+    if os.path.exists(path):
+        with open(path) as f:
+            raw = json.load(f)
+        bars = [Bar(ticker=ticker, timestamp=datetime.fromisoformat(r[0]),
+                    open=r[1], high=r[2], low=r[3], close=r[4], volume=r[5]) for r in raw]
+        _bar_cache[ticker] = bars
+        return bars
     import yfinance as yf
 
-    bars: list[Bar] = []
+    bars = []
     try:
         df = yf.Ticker(ticker).history(
-            start=start.date(), end=(end + timedelta(days=1)).date(),
+            start=_FETCH_START, end=date.today() + timedelta(days=1),
             interval="1h", auto_adjust=False, raise_errors=False,
         )
         for ts, row in df.iterrows():
@@ -121,16 +138,25 @@ def fetch_hourly_bars(ticker: str, start: datetime, end: datetime) -> list[Bar]:
             if t.tzinfo is not None:
                 t = t.astimezone(timezone.utc).replace(tzinfo=None)
             bars.append(Bar(
-                ticker=ticker,
-                timestamp=t,
+                ticker=ticker, timestamp=t,
                 open=float(row["Open"]), high=float(row["High"]),
                 low=float(row["Low"]), close=float(row["Close"]),
                 volume=int(row["Volume"]) if row["Volume"] == row["Volume"] else 0,
             ))
     except Exception as e:  # noqa: BLE001 - data feed is best-effort
         print(f"  ! bar fetch failed for {ticker}: {e}", file=sys.stderr)
+    if bars:  # only freeze successful fetches; let transient failures retry
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        with open(path, "w") as f:
+            json.dump([[b.timestamp.isoformat(), b.open, b.high, b.low, b.close, b.volume] for b in bars], f)
     _bar_cache[ticker] = bars
     return bars
+
+
+def fetch_hourly_bars(ticker: str, start: datetime, end: datetime) -> list[Bar]:
+    """Hourly OHLCV bars within [start, end], UTC-naive. Served from a per-ticker disk
+    cache so backtests are reproducible across runs."""
+    return [b for b in _wide_bars(ticker) if start <= b.timestamp <= end]
 
 
 # ── Exit policy + simulator (mirrors Engine._update_exits) ───────────────────
