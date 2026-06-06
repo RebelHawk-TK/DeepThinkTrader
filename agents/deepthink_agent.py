@@ -450,6 +450,22 @@ class DeepThinkAgent:
             and margin > 0
         )
 
+    @staticmethod
+    def _regime_thresholds(
+        vix: float, base_min_conv: float, base_min_edges: int
+    ) -> tuple[float, int, str]:
+        """Volatility-conditional entry bar: calm markets reward modest edges,
+        panic markets demand more. Conservative caps — relax conviction by at most
+        0.5, and never require more than 3/3 edges. Returns
+        (min_conviction, min_edges, regime_label). VIX comes from the research report.
+        """
+        if vix and vix < 15:
+            return max(1.0, base_min_conv - 0.5), base_min_edges, "low-vol"
+        if vix and vix > 25:
+            # Panic: raise the conviction bar AND demand all available edges (3/3).
+            return min(10.0, base_min_conv + 1.0), min(3, base_min_edges + 1), "high-vol"
+        return base_min_conv, base_min_edges, ("normal" if vix else "unknown")
+
     def analyze(self, report: dict, portfolio: str = "main", news_priority: str = "medium") -> dict:
         """Run deep-think analysis on a research report.
 
@@ -514,22 +530,15 @@ class DeepThinkAgent:
         signal_mode = portfolio == "main" and self.config.MAIN_SIGNAL == "quality_momentum"
 
         # Regime-conditional thresholds: adapt the entry bar to volatility.
-        # Calm markets reward modest edges; panic markets demand more.
-        # Conservative deltas — never relax by more than 0.5 conviction or
-        # require more than 3/3 edges. VIX is already in the research report.
+        # Calm markets reward modest edges; panic markets demand more (extracted to
+        # _regime_thresholds so the high-vol edge bump is unit-tested, not just commented).
         base_min_conv = min_conv
         base_min_edges = self.config.MIN_EDGES_REQUIRED
         regime_data = report.get("market_regime", {}) or {}
         vix = regime_data.get("vix", 0) or 0
-        regime_min_edges = base_min_edges
-        if vix and vix < 15:
-            min_conv = max(1.0, base_min_conv - 0.5)
-            regime_label = "low-vol"
-        elif vix and vix > 25:
-            min_conv = min(10.0, base_min_conv + 1.0)
-            regime_label = "high-vol"
-        else:
-            regime_label = "normal" if vix else "unknown"
+        min_conv, regime_min_edges, regime_label = self._regime_thresholds(
+            vix, base_min_conv, base_min_edges
+        )
         if min_conv != base_min_conv or regime_min_edges != base_min_edges:
             logger.info(
                 f"Regime adjustment for {ticker} (VIX={vix:.1f}, {regime_label}): "
