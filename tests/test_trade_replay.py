@@ -56,3 +56,18 @@ def test_no_bars_after_entry_returns_none():
     bars = _bars([(100, 101, 100)])
     late = Entry(1, "T", datetime(2027, 1, 1), 100, 96, 110, None, None, None)
     assert simulate_exit(late, bars, ExitPolicy("p", 2.0, 1.5)) is None
+
+
+def test_parse_ts_localizes_naive_db_timestamps_to_utc():
+    """DB timestamps are naive local Eastern (datetime.now().isoformat()); bars
+    are naive UTC. _parse_ts must shift naive input ET -> UTC or every next-bar
+    entry is backdated ~4-5h (the 2026-06-09 look-ahead bug)."""
+    from backtest.trade_replay import _parse_ts
+
+    # EDT (UTC-4): a 14:00 ET report is 18:00 UTC
+    assert _parse_ts("2026-06-09T14:00:00.123456") == datetime(2026, 6, 9, 18, 0, 0, 123456)
+    # EST (UTC-5): winter timestamps shift by 5
+    assert _parse_ts("2026-01-15T14:00:00") == datetime(2026, 1, 15, 19, 0)
+    # Already-aware input still normalizes to naive UTC
+    assert _parse_ts("2026-06-09T18:00:00+00:00") == datetime(2026, 6, 9, 18, 0)
+    assert _parse_ts("2026-06-09T14:00:00-04:00") == datetime(2026, 6, 9, 18, 0)

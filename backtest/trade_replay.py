@@ -27,10 +27,15 @@ import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from brokers.base import Bar
 
 DB_PATH = Path(__file__).resolve().parents[1] / "trades.db"
+
+# DB timestamps are written with datetime.now().isoformat() — naive LOCAL
+# EASTERN — while bar timestamps are naive UTC.
+_DB_LOCAL_TZ = ZoneInfo("America/New_York")
 
 
 # ── Entry records (the bot's real trades) ────────────────────────────────────
@@ -51,15 +56,21 @@ class Entry:
 
 
 def _parse_ts(s: str) -> datetime:
-    """Parse a trades.db timestamp into a UTC-naive datetime."""
+    """Parse a trades.db timestamp into a UTC-naive datetime.
+
+    Naive input is localized ET -> UTC before any comparison with bar
+    timestamps; passing it through unshifted backdates every "next bar after
+    the report" entry by 4-5 hours (the 2026-06-09 look-ahead bug that
+    inflated quality_momentum to PF ~1.5).
+    """
     s = s.strip().replace("Z", "+00:00")
     try:
         dt = datetime.fromisoformat(s)
     except ValueError:
         dt = datetime.fromisoformat(s[:19])
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_DB_LOCAL_TZ)
+    return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def load_entries(portfolio: str = "main", limit: int | None = None) -> list[Entry]:
