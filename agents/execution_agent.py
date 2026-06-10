@@ -233,10 +233,7 @@ class ExecutionAgent:
             "time_in_force": "day",
         }
         try:
-            resp = self._session.post(f"{self._base_url}/v2/orders", json=order_payload)
-            request_id = self._capture_request_id(resp, "/v2/orders", "POST", ticker=ticker)
-            resp.raise_for_status()
-            order_data = resp.json()
+            order_data, request_id = self._submit_order(order_payload, ticker)
             logger.info(
                 f"LIMIT ORDER placed: {side.upper()} {shares}x {ticker} @ limit ${limit_price} "
                 f"| Order ID: {order_data['id']} | X-Request-ID: {request_id}"
@@ -532,8 +529,30 @@ class ExecutionAgent:
                     return {"status": "ERROR", "ticker": ticker, "message": "Limit order placement failed"}
                 alpaca_order_id = order_data["id"]
                 request_id = None
+
+                # Record only what ACTUALLY filled. A limit order saved as a
+                # filled trade becomes a ghost row whose later "reconcile"
+                # fabricates P&L for a position that never existed.
+                fill = self._settle_limit_entry(alpaca_order_id, ticker, shares)
+                if fill["filled_qty"] <= 0:
+                    logger.warning(
+                        f"LIMIT ENTRY UNFILLED: {ticker} — order canceled, no trade recorded"
+                    )
+                    return {
+                        "status": "SKIPPED",
+                        "ticker": ticker,
+                        "message": "Limit order unfilled within window — canceled, no trade recorded",
+                    }
+                if fill["filled_qty"] < shares:
+                    logger.warning(
+                        f"PARTIAL LIMIT FILL for {ticker}: {fill['filled_qty']}/{shares} shares"
+                    )
+                shares = fill["filled_qty"]
+                current_price = fill["filled_price"] or current_price
+                risk_per_share = current_price * (stop_loss_pct / 100)
+                risk_amount = round(shares * risk_per_share, 2)
             else:
-                # Place market order via raw HTTP to capture X-Request-ID
+                # Market order with client_order_id idempotency + recovery
                 order_payload = {
                     "symbol": ticker,
                     "qty": str(shares),
@@ -541,14 +560,7 @@ class ExecutionAgent:
                     "type": "market",
                     "time_in_force": "day",
                 }
-                resp = self._session.post(
-                    f"{self._base_url}/v2/orders", json=order_payload
-                )
-                request_id = self._capture_request_id(
-                    resp, "/v2/orders", "POST", ticker=ticker
-                )
-                resp.raise_for_status()
-                order_data = resp.json()
+                order_data, request_id = self._submit_order(order_payload, ticker)
                 alpaca_order_id = order_data["id"]
 
                 # Update the request_id record with the order_id
@@ -559,7 +571,7 @@ class ExecutionAgent:
                         method="POST",
                         ticker=ticker,
                         order_id=alpaca_order_id,
-                        http_status=resp.status_code,
+                        http_status=200,
                         success=True,
                     )
 
@@ -697,6 +709,8 @@ class ExecutionAgent:
 
         deadline = time.time() + timeout_seconds
         last_status = "new"
+        last_filled_qty = 0
+        last_filled_price = 0.0
 
         while time.time() < deadline:
             try:
@@ -708,6 +722,8 @@ class ExecutionAgent:
                 filled_qty = int(order.get("filled_qty", 0) or 0)
                 filled_price = float(order.get("filled_avg_price", 0) or 0)
                 last_status = status
+                last_filled_qty = filled_qty
+                last_filled_price = filled_price
 
                 if status == "filled":
                     if filled_qty < expected_qty:
@@ -742,14 +758,136 @@ class ExecutionAgent:
 
             time.sleep(2)
 
-        # Timeout — check final state
-        logger.info(f"Order {order_id} poll timeout (status={last_status}) for {ticker}")
+        # Timeout — report what was actually observed filled, never pretend zero
+        # (a timeout that discards real fills makes the DB diverge from Alpaca).
+        logger.info(
+            f"Order {order_id} poll timeout (status={last_status}, "
+            f"filled {last_filled_qty}) for {ticker}"
+        )
         return {
             "status": last_status,
-            "filled_qty": 0,
-            "filled_price": 0.0,
+            "filled_qty": last_filled_qty,
+            "filled_price": last_filled_price,
             "order_id": order_id,
         }
+
+    def _cancel_order(self, order_id: str, ticker: str) -> bool:
+        """Cancel an open order. Returns True if Alpaca accepted the cancel."""
+        try:
+            resp = self._session.delete(f"{self._base_url}/v2/orders/{order_id}")
+            self._capture_request_id(resp, f"/v2/orders/{order_id}", "DELETE", ticker=ticker)
+            return resp.ok
+        except Exception as e:
+            logger.warning(f"Cancel failed for order {order_id} ({ticker}): {e}")
+            return False
+
+    def _final_order_state(self, order_id: str) -> dict | None:
+        """One-shot order lookup: {"status", "filled_qty", "filled_price"} or None."""
+        try:
+            resp = self._session.get(f"{self._base_url}/v2/orders/{order_id}")
+            if not resp.ok:
+                return None
+            order = resp.json()
+            return {
+                "status": order.get("status", ""),
+                "filled_qty": int(order.get("filled_qty", 0) or 0),
+                "filled_price": float(order.get("filled_avg_price", 0) or 0),
+            }
+        except Exception as e:
+            logger.warning(f"Final order state lookup failed for {order_id}: {e}")
+            return None
+
+    def _settle_limit_entry(self, order_id: str, ticker: str, shares: int) -> dict:
+        """Resolve a limit entry to its ACTUAL fills before anything is recorded.
+
+        Polls for a fill; if not fully filled in the window, cancels the
+        remainder and re-reads the order once (a fill can race the cancel).
+        Returns {"filled_qty": int, "filled_price": float}. A zero filled_qty
+        means no trade happened — the caller must not record one.
+        """
+        fill = self._poll_order_status(order_id, ticker, shares, timeout_seconds=60)
+        filled_qty = int(fill.get("filled_qty") or 0)
+        filled_price = float(fill.get("filled_price") or 0)
+        if fill.get("status") != "filled":
+            self._cancel_order(order_id, ticker)
+            final = self._final_order_state(order_id)
+            if final is not None:
+                filled_qty = final["filled_qty"]
+                filled_price = final["filled_price"] or filled_price
+        return {"filled_qty": filled_qty, "filled_price": filled_price}
+
+    def _submit_order(self, payload: dict, ticker: str) -> tuple[dict, str | None]:
+        """POST an order with a client_order_id and transport-failure recovery.
+
+        If the POST times out or the connection drops AFTER Alpaca accepted the
+        order, the position would exist with no DB row (never exit-managed) and
+        the next cycle could double-buy. So on transport failure we look the
+        order up by client_order_id before declaring it failed.
+
+        Returns (order_data, request_id). Raises on genuine submission failure.
+        """
+        import uuid
+
+        payload.setdefault("client_order_id", f"dtt{self.user_id}-{uuid.uuid4().hex[:16]}")
+        try:
+            resp = self._session.post(f"{self._base_url}/v2/orders", json=payload)
+            request_id = self._capture_request_id(resp, "/v2/orders", "POST", ticker=ticker)
+            resp.raise_for_status()
+            return resp.json(), request_id
+        except (http_requests.Timeout, http_requests.ConnectionError):
+            try:
+                lookup = self._session.get(
+                    f"{self._base_url}/v2/orders:by_client_order_id",
+                    params={"client_order_id": payload["client_order_id"]},
+                )
+            except Exception:
+                raise  # transport is fully down — surface the original failure
+            if lookup.ok:
+                order = lookup.json()
+                logger.warning(
+                    f"Order POST transport failure for {ticker} but order "
+                    f"{order.get('id')} WAS accepted — recovered via client_order_id"
+                )
+                return order, None
+            raise
+
+    def _resolve_exit_fill(
+        self,
+        close_resp,
+        ticker: str,
+        entry: float,
+        qty: int,
+        is_long: bool,
+        fallback_price: float,
+        fallback_pnl: float,
+    ) -> tuple[float, float]:
+        """Resolve the ACTUAL fill of a liquidation order created by
+        DELETE /v2/positions (its response body is the close order).
+
+        Returns (exit_price, pnl) from fills, or the pre-close snapshot values
+        when the fill can't be read — recorded P&L should be what the account
+        realized, not the quote the loop happened to see.
+        """
+        order_id = None
+        try:
+            order_id = (close_resp.json() or {}).get("id")
+        except Exception:
+            pass
+        if order_id:
+            fill = self._poll_order_status(order_id, ticker, qty, timeout_seconds=20)
+            price = float(fill.get("filled_price") or 0)
+            filled_qty = int(fill.get("filled_qty") or 0)
+            if price > 0 and filled_qty > 0:
+                pnl = (
+                    round((price - entry) * filled_qty, 2)
+                    if is_long
+                    else round((entry - price) * filled_qty, 2)
+                )
+                return price, pnl
+        logger.warning(
+            f"Exit fill unavailable for {ticker} — recording snapshot price/P&L"
+        )
+        return fallback_price, fallback_pnl
 
     def _retry_as_limit_order(self, ticker: str, shares: int, price: float, side: str) -> dict | None:
         """Retry a failed market order as a limit order with slippage buffer."""
@@ -766,10 +904,7 @@ class ExecutionAgent:
             "time_in_force": "day",
         }
         try:
-            resp = self._session.post(f"{self._base_url}/v2/orders", json=order_payload)
-            self._capture_request_id(resp, "/v2/orders", "POST", ticker=ticker)
-            resp.raise_for_status()
-            order_data = resp.json()
+            order_data, _ = self._submit_order(order_payload, ticker)
             logger.info(f"RETRY limit order placed: {order_data['id']} for {ticker}")
             return order_data
         except Exception as e:
@@ -944,6 +1079,18 @@ class ExecutionAgent:
         try:
             open_trades = self.db.get_open_trades(self.user_id)
             positions = {p["ticker"] for p in self.get_positions()}
+            # Reverse direction: Alpaca positions with no DB row are NEVER
+            # exit-managed (no stop, no TP, no time stop). Surface them loudly;
+            # don't touch them — they may be deliberate manual positions.
+            db_tickers = {t["ticker"] for t in open_trades}
+            unmanaged = sorted(positions - db_tickers)
+            if unmanaged:
+                logger.error(
+                    f"UNMANAGED Alpaca position(s) with no DB trade row: "
+                    f"{', '.join(unmanaged)} — the bot will not manage exits for "
+                    f"these (no stop/TP). Likely a timed-out bot order or a manual "
+                    f"position; close or adopt manually."
+                )
             ghosts = [t for t in open_trades if t["ticker"] not in positions]
             if not ghosts:
                 logger.info(f"Startup reconcile: {len(open_trades)} OPEN trades match Alpaca — no ghosts")
@@ -1073,6 +1220,7 @@ class ExecutionAgent:
                     last_price = entry
                 pnl = round((last_price - entry) * qty, 2) if is_long else round((entry - last_price) * qty, 2)
                 self.db.close_trade(trade_id, last_price, pnl, exit_reason="alpaca_reconcile_retry")
+                self.db.update_daily_pnl(self.user_id, pnl, pnl > 0)
                 logger.info(f"DB SYNC retry succeeded for {ticker} — closed at ${last_price:.2f}, P&L: ${pnl:+.2f}")
                 exits.append({"trade_id": trade_id, "ticker": ticker, "reason": "alpaca_reconcile_retry", "pnl": pnl})
             except Exception as e2:
@@ -1293,23 +1441,40 @@ class ExecutionAgent:
                         "type": "market",
                         "time_in_force": "day",
                     }
-                    resp = self._session.post(f"{self._base_url}/v2/orders", json=order_payload)
-                    req_id = self._capture_request_id(resp, "/v2/orders", "POST", ticker=ticker)
-                    resp.raise_for_status()
-                    order_data = resp.json()
+                    order_data, _ = self._submit_order(order_payload, ticker)
 
-                    partial_pnl = exit_qty * (current - entry if is_long else entry - current)
-                    new_qty = trade["quantity"] - exit_qty
+                    # Record the scale-out from ACTUAL fills — a rejected or
+                    # unfilled child order must not decrement DB quantity or
+                    # book P&L at the quote.
+                    fill = self._poll_order_status(
+                        order_data["id"], ticker, exit_qty, timeout_seconds=20
+                    )
+                    filled_qty = int(fill.get("filled_qty") or 0)
+                    if filled_qty <= 0:
+                        self._cancel_order(order_data["id"], ticker)
+                        final = self._final_order_state(order_data["id"])
+                        if final is not None:
+                            filled_qty = final["filled_qty"]
+                            fill["filled_price"] = final["filled_price"] or fill.get("filled_price")
+                    if filled_qty <= 0:
+                        logger.warning(
+                            f"PARTIAL EXIT UNFILLED for {ticker} — order canceled, "
+                            f"nothing recorded; will retry next check"
+                        )
+                        continue
+                    exit_px = float(fill.get("filled_price") or 0) or current
+                    partial_pnl = filled_qty * (exit_px - entry if is_long else entry - exit_px)
+                    new_qty = trade["quantity"] - filled_qty
 
                     self.db.save_partial_exit(
-                        trade["id"], exit_qty, current, partial_pnl, reason, order_data["id"]
+                        trade["id"], filled_qty, exit_px, partial_pnl, reason, order_data["id"]
                     )
                     self.db.update_trade_quantity(trade["id"], new_qty)
                     self.db.update_daily_pnl(self.user_id, partial_pnl, partial_pnl > 0)
 
                     notify_trade_exited(ticker, reason, partial_pnl, partial=True)
                     logger.info(
-                        f"PARTIAL EXIT — {ticker}: {exit_qty} shares @ ${current} | "
+                        f"PARTIAL EXIT — {ticker}: {filled_qty} shares @ ${exit_px} | "
                         f"{reason} | P&L: ${partial_pnl:.2f} | Remaining: {new_qty}"
                     )
                     exits.append({
@@ -1318,7 +1483,7 @@ class ExecutionAgent:
                         "reason": reason,
                         "pnl": partial_pnl,
                         "partial": True,
-                        "qty_sold": exit_qty,
+                        "qty_sold": filled_qty,
                         "qty_remaining": new_qty,
                     })
                 except Exception as e:
@@ -1327,12 +1492,13 @@ class ExecutionAgent:
             # Execute full exit
             if should_exit:
                 pnl = pos["unrealized_pnl"]
-                exits.append({
+                exit_record = {
                     "trade_id": trade["id"],
                     "ticker": ticker,
                     "reason": reason,
                     "pnl": pnl,
-                })
+                }
+                exits.append(exit_record)
                 try:
                     resp = self._session.delete(
                         f"{self._base_url}/v2/positions/{ticker}"
@@ -1341,7 +1507,13 @@ class ExecutionAgent:
                         resp, f"/v2/positions/{ticker}", "DELETE", ticker=ticker
                     )
                     resp.raise_for_status()
-                    self.db.close_trade(trade["id"], current, pnl, exit_reason=reason)
+                    # Record what the account REALIZED, not the loop's snapshot.
+                    exit_price, pnl = self._resolve_exit_fill(
+                        resp, ticker, entry, trade["quantity"], is_long,
+                        fallback_price=current, fallback_pnl=pnl,
+                    )
+                    exit_record["pnl"] = pnl
+                    self.db.close_trade(trade["id"], exit_price, pnl, exit_reason=reason)
                     self.db.update_daily_pnl(self.user_id, pnl, pnl > 0)
                     notify_trade_exited(ticker, reason, pnl)
                     logger.info(
@@ -1397,6 +1569,13 @@ class ExecutionAgent:
                 resp, f"/v2/positions/{ticker}", "DELETE", ticker=ticker
             )
             resp.raise_for_status()
+            exit_price, pnl = self._resolve_exit_fill(
+                resp, ticker,
+                entry=trade.get("entry_price", 0) or 0,
+                qty=trade.get("quantity", 0) or 0,
+                is_long=trade.get("action") == "BUY",
+                fallback_price=exit_price, fallback_pnl=pnl,
+            )
             self.db.close_trade(trade["id"], exit_price, pnl, exit_reason=reason)
             self.db.update_daily_pnl(self.user_id, pnl, pnl > 0)
             notify_trade_exited(ticker, reason, pnl)

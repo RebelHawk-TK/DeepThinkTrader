@@ -910,13 +910,25 @@ class Database:
     def close_trade(
         self, trade_id: int, exit_price: float, pnl: float, exit_reason: str = ""
     ) -> None:
-        """Close a trade and record edge performance. user_id is read from the trade row."""
+        """Close a trade and record edge performance. user_id is read from the trade row.
+
+        ``pnl`` is the FINAL-LEG P&L only. Realized scale-out P&L from
+        partial_exits is added here so trades.pnl is the trade's true outcome
+        (Kelly stats, edge_performance, auto-pause, and revenge detection all
+        read trades.pnl). Callers must still pass the leg-only pnl to
+        update_daily_pnl — partial legs were booked there on their own day.
+        """
         # Both writes happen on the SAME connection to avoid self-deadlock.
         with self._get_conn() as conn:
+            partial_pnl = conn.execute(
+                "SELECT COALESCE(SUM(pnl), 0) FROM partial_exits WHERE trade_id = ?",
+                (trade_id,),
+            ).fetchone()[0]
+            total_pnl = round(pnl + (partial_pnl or 0), 2)
             conn.execute(
                 """UPDATE trades SET status = 'CLOSED', exit_price = ?,
                    exit_timestamp = ?, pnl = ?, exit_reason = ? WHERE id = ?""",
-                (exit_price, datetime.now().isoformat(), pnl, exit_reason, trade_id),
+                (exit_price, datetime.now().isoformat(), total_pnl, exit_reason, trade_id),
             )
 
             trade = conn.execute(
@@ -946,7 +958,7 @@ class Database:
                         (trade["user_id"], trade_id, trade["ticker"], datetime.now().isoformat(), edge_combo,
                          trade["edges_fired"] or 0,
                          1 if fund else 0, 1 if tech else 0, 1 if sent else 0,
-                         trade["conviction"] or 0, pnl, 1 if pnl > 0 else 0,
+                         trade["conviction"] or 0, total_pnl, 1 if total_pnl > 0 else 0,
                          trade["portfolio"] or "main"),
                     )
                 except (json.JSONDecodeError, TypeError):
