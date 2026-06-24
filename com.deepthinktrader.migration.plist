@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.deepthinktrader.migration</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/rebelhawk/Projects/StockTrader/scripts/run_migration_at_open.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/rebelhawk/Projects/StockTrader</string>
+    <key>RunAtLoad</key>
+    <false/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Month</key>
+        <integer>6</integer>
+        <key>Day</key>
+        <integer>24</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>35</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/rebelhawk/Library/Logs/DeepThinkTrader/migration.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/rebelhawk/Library/Logs/DeepThinkTrader/migration.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/rebelhawk/.venvs/deepthinktrader/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

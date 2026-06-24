@@ -30,3 +30,7 @@ digests/
 
 # Weekend-brief runtime state — written per weekend sweep
 data/last_weekend_brief.json
+
+# Migration runtime (account split) — local only, never committed
+.migration_keys.env
+.migration_done
