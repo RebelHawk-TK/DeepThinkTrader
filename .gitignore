@@ -24,3 +24,6 @@ tunable_params.json
 
 # Bot runtime state (paused_portfolios, last_scan_date) — written every cycle
 .state.json
+
+# Generated digests (premarket/weekend briefs) — runtime output, written per cycle
+digests/
