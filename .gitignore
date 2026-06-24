@@ -27,3 +27,6 @@ tunable_params.json
 
 # Generated digests (premarket/weekend briefs) — runtime output, written per cycle
 digests/
+
+# Weekend-brief runtime state — written per weekend sweep
+data/last_weekend_brief.json
