@@ -65,10 +65,11 @@ class Config:
     # exit-managed while disabled — only NEW main entries stop. Set MAIN_ENABLED=true to resume.
     MAIN_ENABLED: bool = os.getenv("MAIN_ENABLED", "true").lower() == "true"
     PENNY_ENABLED: bool = os.getenv("PENNY_ENABLED", "true").lower() == "true"
-    # MAIN entry strategy. "conviction" = the legacy multi-edge/LLM stack (NO validated
-    # edge — backtest.walk_forward_entries: PF 0.53 OOS, 0.66 at zero cost). "quality_momentum"
-    # = the validated factor (backtest.validate_quality_momentum: OOS PF 1.35, look-ahead-clean)
-    # — above SMA-20 + revenue_growth>0 + profit_margin>0 + up-day. Applies to the MAIN book only.
+    # MAIN entry strategy. NEITHER value has a validated edge (2026-06-09 review):
+    # "conviction" = legacy multi-edge/LLM stack (walk_forward_entries PF 0.53 OOS, 0.66 at
+    # zero cost). "quality_momentum" = above SMA-20 + revenue_growth>0 + profit_margin>0 +
+    # up-day; its old "OOS PF 1.35" was a tz look-ahead artifact, corrected next-bar PF 0.98.
+    # Applies to the MAIN book only and is inert while MAIN_ENABLED=false.
     MAIN_SIGNAL: str = os.getenv("MAIN_SIGNAL", "conviction").lower()
 
     # Load mode preset, fall back to normal if invalid

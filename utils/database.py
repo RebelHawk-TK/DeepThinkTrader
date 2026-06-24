@@ -40,7 +40,7 @@ class Database:
             mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
             conn.close()
             if mode.lower() == "wal":
-                logger.info(f"SQLite WAL mode enabled for {self.db_path}")
+                logger.debug(f"SQLite WAL mode enabled for {self.db_path}")
         except Exception:
             pass
 

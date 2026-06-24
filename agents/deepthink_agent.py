@@ -432,10 +432,11 @@ class DeepThinkAgent:
 
     @staticmethod
     def _quality_momentum_signal(report: dict) -> bool:
-        """Validated MAIN entry rule (backtest.validate_quality_momentum: OOS PF 1.35,
-        look-ahead-clean): above SMA-20 + revenue_growth>0 + profit_margin>0 + up on the
-        day. A simple quality+momentum factor that beat the conviction stack on the same
-        scanned universe. Used for the main book only when MAIN_SIGNAL=quality_momentum.
+        """MAIN entry rule (NO validated edge — see 2026-06-09 review): above SMA-20 +
+        revenue_growth>0 + profit_margin>0 + up on the day. The original "OOS PF 1.35"
+        was a timezone look-ahead artifact in the backtest; corrected next-bar PF is 0.98
+        (95% CI [0.71, 1.34], straddles 1.0). Inert while MAIN_ENABLED=false. Do not
+        re-trust without fresh forward data clearing the corrected validator.
         """
         t = report.get("technicals") or {}
         fin = (report.get("fundamentals") or {}).get("financials") or {}
