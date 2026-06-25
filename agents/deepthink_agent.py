@@ -452,6 +452,36 @@ class DeepThinkAgent:
         )
 
     @staticmethod
+    def _momentum_breakout_signal(report: dict) -> bool:
+        """MAIN entry rule — momentum_breakout. EXACT replica of the backtest
+        (backtest.signal_search 'momentum_breakout'), the only liquid-universe candidate
+        clearing the bootstrap PF gate: 95% CI [1.67, 2.74, 4.22], 280 trades, PF>1 in all
+        three time-thirds (status_2026-06-25). Above SMA-10 AND SMA-20, volume > 2x average,
+        up > 3% on the day, RSI < 75 (not yet overbought).
+
+        Fields + float-coercion mirror signal_search.load_candidates so live == backtest.
+        NOTE the RSI default is intentional fidelity, not a bug: a missing/unparseable
+        rsi_14 coerces to 0.0, and 0.0 < 75 passes — exactly as the validated backtest did.
+        Do not add a `0 <` lower guard; that would make live STRICTER than the backtest.
+        Caveat: validated in-sample over one ~3-month window; treat live as a forward test.
+        """
+        t = report.get("technicals") or {}
+
+        def _f(x, d=0.0):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return d
+
+        return (
+            bool(t.get("above_sma_10"))
+            and bool(t.get("above_sma_20"))
+            and _f(t.get("volume_ratio")) > 2
+            and _f(t.get("daily_change_pct")) > 3
+            and _f(t.get("rsi_14")) < 75
+        )
+
+    @staticmethod
     def _regime_thresholds(
         vix: float, base_min_conv: float, base_min_edges: int
     ) -> tuple[float, int, str]:
@@ -525,10 +555,13 @@ class DeepThinkAgent:
             max_risk = self.config.MAX_RISK_PER_TRADE
             min_conv = self.config.MIN_CONVICTION
 
-        # Quality-momentum signal mode: the main book uses the validated factor rule
-        # instead of the conviction/edge/LLM stack (which has no edge). When on, debate +
-        # Claude + the edge gates are skipped and the action is set by the signal below.
-        signal_mode = portfolio == "main" and self.config.MAIN_SIGNAL == "quality_momentum"
+        # Factor-signal mode: the main book uses a pure factor rule instead of the
+        # conviction/edge/LLM stack (which has no edge). When on, debate + Claude + the
+        # edge gates are skipped and the action is set by the selected signal below.
+        # momentum_breakout is the bootstrap-validated rule (status_2026-06-25);
+        # quality_momentum is the prior (gate-failing) rule, kept selectable.
+        MAIN_FACTOR_SIGNALS = ("quality_momentum", "momentum_breakout")
+        signal_mode = portfolio == "main" and self.config.MAIN_SIGNAL in MAIN_FACTOR_SIGNALS
 
         # Regime-conditional thresholds: adapt the entry bar to volatility.
         # Calm markets reward modest edges; panic markets demand more (extracted to
@@ -750,18 +783,24 @@ class DeepThinkAgent:
             action = "HOLD"
             edge_reason = "BUY blocked: fundamental edge required (REQUIRE_FUNDAMENTAL_EDGE)"
 
-        # Quality-momentum signal mode (main): the validated factor REPLACES the conviction/
-        # edge decision above as the entry rule (backtest.validate_quality_momentum OOS PF 1.35).
-        # Risk gates, sizing and exits still apply downstream in the execution agent.
+        # Factor-signal mode (main): the selected factor rule REPLACES the conviction/edge
+        # decision above as the entry rule. Risk gates, sizing and exits still apply
+        # downstream in the execution agent.
         if signal_mode:
-            if self._quality_momentum_signal(report):
+            if self.config.MAIN_SIGNAL == "momentum_breakout":
+                fired = self._momentum_breakout_signal(report)
+                signal_desc = "momentum_breakout: >SMA10&20 + vol>2x + day>3% + rsi<75"
+            else:  # quality_momentum
+                fired = self._quality_momentum_signal(report)
+                signal_desc = "quality_momentum: SMA20 + rev_growth>0 + margin>0 + up-day"
+            if fired:
                 action = "BUY"
-                edge_reason = "quality_momentum: SMA20 + rev_growth>0 + margin>0 + up-day"
+                edge_reason = signal_desc
                 conviction = max(conviction, base_min_conv)  # let downstream gates pass
             else:
                 action = "HOLD"
-                edge_reason = "quality_momentum: no signal"
-            logger.info(f"{ticker}: [main quality_momentum] -> {action} (conv {conviction})")
+                edge_reason = f"{self.config.MAIN_SIGNAL}: no signal"
+            logger.info(f"{ticker}: [main {self.config.MAIN_SIGNAL}] -> {action} (conv {conviction})")
 
         # Build reasoning summary
         top_bull = sorted(bullish, key=lambda x: x["strength"], reverse=True)[:2]
