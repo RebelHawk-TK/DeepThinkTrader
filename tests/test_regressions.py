@@ -59,6 +59,7 @@ def test_b2_drawdown_uses_equity_curve_not_daily_pnl(risk_manager, monkeypatch):
     cumulative P&L peak and would almost always trip. New code must use the
     Alpaca equity curve directly — peak vs current, no DB mix-in.
     """
+    monkeypatch.setattr(risk_manager.config, "SIZING_NOTIONAL_CAP", 0.0)  # exercise Alpaca path
     equity = [
         100_000, 101_000, 102_000, 103_000, 104_000, 105_000,  # peak
         104_000, 103_500, 103_000, 102_800, 102_500,  # ~2.4% drawdown (OK)
@@ -70,6 +71,7 @@ def test_b2_drawdown_uses_equity_curve_not_daily_pnl(risk_manager, monkeypatch):
 
 
 def test_b2_drawdown_halts_when_threshold_breached(risk_manager, monkeypatch):
+    monkeypatch.setattr(risk_manager.config, "SIZING_NOTIONAL_CAP", 0.0)  # exercise Alpaca path
     equity = [100_000, 105_000, 110_000, 115_000, 120_000, 100_000]  # -16.7%
     monkeypatch.setattr(
         risk_manager, "_fetch_alpaca_equity_history", lambda days=30: equity
@@ -81,10 +83,36 @@ def test_b2_drawdown_halts_when_threshold_breached(risk_manager, monkeypatch):
 def test_b2_drawdown_allows_when_history_short(risk_manager, monkeypatch):
     """<5 equity points → too little data, allow trading (don't block on
     transient network errors or fresh accounts)."""
+    monkeypatch.setattr(risk_manager.config, "SIZING_NOTIONAL_CAP", 0.0)  # exercise Alpaca path
     monkeypatch.setattr(
         risk_manager, "_fetch_alpaca_equity_history", lambda days=30: [100_000]
     )
     assert risk_manager.check_drawdown_halt(account_value=100_000) is True
+
+
+def test_b2_sleeve_drawdown_used_when_cap_active(risk_manager, monkeypatch):
+    """With SIZING_NOTIONAL_CAP active, check_drawdown_halt must measure the BOT's
+    sleeve curve (daily_pnl seeded at the cap), NOT the commingled Alpaca account —
+    so a big account-level swing can't false-halt, but a real sleeve drawdown still does.
+    """
+    monkeypatch.setattr(risk_manager.config, "SIZING_NOTIONAL_CAP", 20_000.0)
+    # A commingled Alpaca curve that WOULD halt (-20%) must be ignored when cap is active.
+    monkeypatch.setattr(
+        risk_manager, "_fetch_alpaca_equity_history",
+        lambda days=30: [100_000, 95_000, 90_000, 85_000, 82_000, 80_000],
+    )
+    # Real sleeve drawdown -12.5% from the cap -> halt.
+    monkeypatch.setattr(
+        risk_manager, "_fetch_sleeve_equity_history",
+        lambda days=30: [20_000, 19_500, 19_000, 18_200, 17_600, 17_500],
+    )
+    assert risk_manager.check_drawdown_halt(account_value=20_000) is False
+    # Healthy sleeve (+) -> allow, even though the Alpaca curve above is down 20%.
+    monkeypatch.setattr(
+        risk_manager, "_fetch_sleeve_equity_history",
+        lambda days=30: [20_000, 20_100, 20_050, 20_200, 20_150, 20_300],
+    )
+    assert risk_manager.check_drawdown_halt(account_value=20_000) is True
 
 
 @responses.activate

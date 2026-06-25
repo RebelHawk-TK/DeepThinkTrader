@@ -145,6 +145,14 @@ class Config:
     # (see risk_manager.check_drawdown_halt) — capping only the $-sizing path, not ratios.
     # See docs/status_2026-06-25.md.
     SIZING_NOTIONAL_CAP: float = float(os.getenv("SIZING_NOTIONAL_CAP", "0"))
+    # Sleeve-relative drawdown baseline (2026-06-25). When SIZING_NOTIONAL_CAP is active,
+    # check_drawdown_halt measures the BOT's own equity curve (daily_pnl seeded at the cap),
+    # NOT the ETF-commingled Alpaca account whose ~12% swings would false-halt the bot. This
+    # date is the strategy-cutover high-water reset: realized P&L before it (the retired
+    # quality_momentum/penny books, and the one-time 2026-06-10 ETF reconcile noise) is
+    # excluded so a prior strategy's losses don't halt momentum_breakout. "" = pure trailing
+    # window (no cutover). Separate from BASELINE_DATE (which only drives dashboard display).
+    SLEEVE_DRAWDOWN_BASELINE: str = os.getenv("SLEEVE_DRAWDOWN_BASELINE", "")
     WATCHLIST: list[str] = os.getenv("WATCHLIST", "NVDA,TSLA,AAPL,AMD,SPY").split(",")
     MAX_RISK_PER_TRADE: float = float(os.getenv(
         "MAX_RISK_PER_TRADE", str(_mode["MAX_RISK_PER_TRADE"])))

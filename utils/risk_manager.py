@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from config import Config
 from utils.database import Database
@@ -255,16 +255,56 @@ class RiskManager:
             logger.warning(f"Failed to fetch Alpaca equity history: {e}")
             return []
 
+    def _fetch_sleeve_equity_history(self, days: int = 30) -> list[float]:
+        """Bot-sleeve daily equity curve for the drawdown halt — isolated from the
+        ETF-commingled Alpaca account.
+
+        The bot's ETF allocation is unmanaged and does not hit daily_pnl going forward,
+        so daily_pnl IS the bot's own P&L. Seeded at the sizing cap; each point =
+        cap + cumulative bot realized P&L (+ that day's unrealized) since the window
+        start. Honors SLEEVE_DRAWDOWN_BASELINE (strategy-cutover high-water reset) so a
+        retired strategy's prior losses — and the one-time 2026-06-10 ETF reconcile
+        rows — don't halt the current strategy. Always returns >= 1 point (the seed),
+        so 'no trades yet since cutover' reads as fresh-start (allow), not blind (block).
+        """
+        cap = self.config.SIZING_NOTIONAL_CAP
+        base = cap if (cap and cap > 0) else self.config.ACCOUNT_SIZE
+        window_start = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cutover = (getattr(self.config, "SLEEVE_DRAWDOWN_BASELINE", "") or "").strip()
+        start = max(window_start, cutover) if cutover else window_start
+        try:
+            with self.db._get_conn() as conn:
+                rows = conn.execute(
+                    "SELECT realized_pnl, unrealized_pnl FROM daily_pnl "
+                    "WHERE user_id = ? AND date >= ? ORDER BY date ASC",
+                    (self.user_id, start),
+                ).fetchall()
+        except Exception as e:
+            logger.warning(f"sleeve equity history query failed: {e}")
+            rows = []
+        equity = [base]
+        running = 0.0
+        for r in rows:
+            running += (r[0] or 0.0)          # realized_pnl (index access — no row_factory dep)
+            equity.append(base + running + (r[1] or 0.0))  # + that day's unrealized
+        return equity
+
     def check_drawdown_halt(self, account_value: float) -> bool:
         """Return True if drawdown from peak is within limits (OK to trade).
 
         Blocks new entries if drawdown > MAX_DRAWDOWN_HALT_PCT in last 30 days.
 
-        Uses Alpaca's portfolio_history endpoint for an authoritative equity
-        curve; falls back to permitting trading if history can't be fetched or
-        is too short to evaluate (less scary than blocking on transient errors).
+        With SIZING_NOTIONAL_CAP active, measures the BOT's own sleeve equity curve
+        (daily_pnl seeded at the cap, from the SLEEVE_DRAWDOWN_BASELINE cutover) — the
+        ETF-commingled Alpaca account's ~12% swings would otherwise false-halt the bot.
+        Without a cap, uses Alpaca's portfolio_history. Either way, falls back to
+        permitting trading if history is too short (less scary than blocking on noise).
         """
-        equity = self._fetch_alpaca_equity_history(days=30)
+        cap = getattr(self.config, "SIZING_NOTIONAL_CAP", 0)
+        if cap and cap > 0:
+            equity = self._fetch_sleeve_equity_history(days=30)
+        else:
+            equity = self._fetch_alpaca_equity_history(days=30)
         if len(equity) == 0:
             # Fail-safe: a total fetch failure on an established account means we
             # are blind to drawdown — block new entries rather than assume safety.
@@ -274,13 +314,10 @@ class RiskManager:
             return True  # Genuinely short history (new account), allow trading.
 
         peak = max(equity)
-        # Drawdown is a RATIO, so peak and current must be on the same scale. `peak`
-        # comes from the real (uncapped) Alpaca history; when SIZING_NOTIONAL_CAP is
-        # active the caller-passed account_value is the CAPPED sizing basis (~sleeve),
-        # which mixed with the real peak would manufacture a fake ~80% drawdown and
-        # false-halt. So with a cap active, take current from the same real history.
-        # Without a cap, keep preferring the live caller value (fresher than EOD hist).
-        cap = getattr(self.config, "SIZING_NOTIONAL_CAP", 0)
+        # Drawdown is a RATIO — peak and current must be on the same scale/source.
+        # Cap active: both come from the sleeve curve, so current = its latest point.
+        # Cap off: peak is from Alpaca history; prefer the live caller value for current
+        # (fresher than EOD history), falling back to the history's last point.
         if cap and cap > 0:
             current = equity[-1]
         else:
