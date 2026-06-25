@@ -58,13 +58,18 @@ class Config:
     # Trade mode: safe, normal, aggressive (set via TRADE_MODE env var or .env)
     TRADE_MODE: str = os.getenv("TRADE_MODE", "normal").lower()
 
-    # Penny stock portfolio: enabled by default, runs alongside main portfolio
-    # Per-book enable flags (default on). MAIN halted 2026-06-03 via .env MAIN_ENABLED=false:
+    # Per-book enable flags. MAIN halted 2026-06-03 via .env MAIN_ENABLED=false:
     # the entry-side walk-forward (backtest.walk_forward_entries) shows no out-of-sample edge
     # at any cost (PF 0.66 even at zero friction; live -$6,988). Open main positions are still
     # exit-managed while disabled — only NEW main entries stop. Set MAIN_ENABLED=true to resume.
     MAIN_ENABLED: bool = os.getenv("MAIN_ENABLED", "true").lower() == "true"
-    PENNY_ENABLED: bool = os.getenv("PENNY_ENABLED", "true").lower() == "true"
+    # PENNY DROPPED 2026-06-25 — default off (was "true"). The penny book has a real entry
+    # edge (+0.079R if stops honored) that illiquidity structurally destroys: 44/58 live stops
+    # gapped past their level (mean -1.59R, worst -4.12R); live -$1,907. The signal_search PF
+    # 12 is an illiquidity artifact (per-thirds 49->15->3). Unexecutable, so removed from both
+    # review (scanner) and purchase — the scheduled penny scan/cycle is gated on this flag.
+    # See docs/status_2026-06-25.md. Set PENNY_ENABLED=true only to re-investigate, never live.
+    PENNY_ENABLED: bool = os.getenv("PENNY_ENABLED", "false").lower() == "true"
     # MAIN entry strategy. NEITHER value has a validated edge (2026-06-09 review):
     # "conviction" = legacy multi-edge/LLM stack (walk_forward_entries PF 0.53 OOS, 0.66 at
     # zero cost). "quality_momentum" = above SMA-20 + revenue_growth>0 + profit_margin>0 +
