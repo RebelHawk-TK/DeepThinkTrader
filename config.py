@@ -135,6 +135,16 @@ class Config:
 
     # Trading parameters (mode-driven, with env var override)
     ACCOUNT_SIZE: float = float(os.getenv("ACCOUNT_SIZE", "50000"))
+    # Fixed-notional sizing cap (2026-06-25). The paper account commingles the bot's
+    # ~$15.7k trading sleeve with a deliberate ~$77k manual ETF allocation, so the bot
+    # reads ~$92k equity and sizes ~6x too large off it. Rather than split the account
+    # (Tom: don't), cap the basis for all $-denominated risk math (position size,
+    # daily-loss $, risk-of-ruin, sector $) to this notional. 0 = disabled (use real
+    # equity). Set in .env to the intended sleeve (e.g. 20000) before any book resumes.
+    # NOTE: drawdown-halt is a RATIO and intentionally stays on the REAL account curve
+    # (see risk_manager.check_drawdown_halt) — capping only the $-sizing path, not ratios.
+    # See docs/status_2026-06-25.md.
+    SIZING_NOTIONAL_CAP: float = float(os.getenv("SIZING_NOTIONAL_CAP", "0"))
     WATCHLIST: list[str] = os.getenv("WATCHLIST", "NVDA,TSLA,AAPL,AMD,SPY").split(",")
     MAX_RISK_PER_TRADE: float = float(os.getenv(
         "MAX_RISK_PER_TRADE", str(_mode["MAX_RISK_PER_TRADE"])))

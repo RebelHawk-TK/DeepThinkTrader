@@ -274,9 +274,17 @@ class RiskManager:
             return True  # Genuinely short history (new account), allow trading.
 
         peak = max(equity)
-        # Use Alpaca's authoritative current equity rather than caller-passed value
-        # (they should match, but if they don't, Alpaca wins).
-        current = equity[-1] if account_value <= 0 else account_value
+        # Drawdown is a RATIO, so peak and current must be on the same scale. `peak`
+        # comes from the real (uncapped) Alpaca history; when SIZING_NOTIONAL_CAP is
+        # active the caller-passed account_value is the CAPPED sizing basis (~sleeve),
+        # which mixed with the real peak would manufacture a fake ~80% drawdown and
+        # false-halt. So with a cap active, take current from the same real history.
+        # Without a cap, keep preferring the live caller value (fresher than EOD hist).
+        cap = getattr(self.config, "SIZING_NOTIONAL_CAP", 0)
+        if cap and cap > 0:
+            current = equity[-1]
+        else:
+            current = equity[-1] if account_value <= 0 else account_value
         if peak <= 0:
             return True
 

@@ -116,15 +116,26 @@ class ExecutionAgent:
         return request_id
 
     def get_account_value(self) -> float:
-        """Get current account equity from Alpaca, capturing X-Request-ID."""
+        """Get the account equity basis for $-denominated risk sizing.
+
+        Returns real Alpaca equity, capped at SIZING_NOTIONAL_CAP when set (>0) so the
+        bot sizes off its intended sleeve, not the commingled account (ETF-inflated).
+        The cap is min(real, cap): if the account ever falls below the cap, the real,
+        lower number wins. Drawdown-halt deliberately does NOT use this (it's a ratio on
+        the real curve) — see risk_manager.check_drawdown_halt.
+        """
         try:
             resp = self._session.get(f"{self._base_url}/v2/account")
             self._capture_request_id(resp, "/v2/account", "GET")
             resp.raise_for_status()
-            return float(resp.json()["equity"])
+            equity = float(resp.json()["equity"])
         except Exception as e:
             logger.error(f"Failed to fetch account: {e}")
-            return self.config.ACCOUNT_SIZE
+            equity = self.config.ACCOUNT_SIZE
+        cap = self.config.SIZING_NOTIONAL_CAP
+        if cap and cap > 0:
+            return min(equity, cap)
+        return equity
 
     # ── Phase 5a: SPY Snapshot for Circuit Breaker ────────────────
 
