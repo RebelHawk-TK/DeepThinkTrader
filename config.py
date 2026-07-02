@@ -246,6 +246,12 @@ class Config:
     # ── Phase 5: Market Awareness + Learning ──────────────────────
     CIRCUIT_BREAKER_SPY_DROP_PCT: float = float(os.getenv("CIRCUIT_BREAKER_SPY_DROP_PCT", "-2.0"))
     CIRCUIT_BREAKER_VIX_THRESHOLD: float = float(os.getenv("CIRCUIT_BREAKER_VIX_THRESHOLD", "30.0"))
+    # Market regime gate (2026-07-02, check #14): block NEW long entries when SPY
+    # closes below its N-day SMA. Risk plumbing (Faber SSRN-962461 trend filter),
+    # not signal logic — its job is skipping bear regimes, so it does not alter
+    # the momentum_breakout forward test's per-trade behavior in an uptrend.
+    REGIME_GATE_ENABLED: bool = os.getenv("REGIME_GATE_ENABLED", "true").lower() == "true"
+    REGIME_SMA_DAYS: int = int(os.getenv("REGIME_SMA_DAYS", "200"))
 
     # ── Phase 6: Execution Quality ──────────────────────────────
     MAX_SPREAD_PCT: float = float(os.getenv("MAX_SPREAD_PCT", "1.0"))

@@ -160,6 +160,51 @@ class ExecutionAgent:
             logger.debug(f"SPY snapshot failed: {e}")
         return 0.0
 
+    # ── Check #14: SPY vs 200-day SMA (regime gate) ──────────────
+
+    # Class-level daily cache: agents are reconstructed each cycle, but the
+    # regime answer only changes once per trading day.
+    _spy_regime_cache: dict[str, bool | None] = {}
+
+    def _get_spy_regime(self) -> bool | None:
+        """True if SPY's latest close is above its REGIME_SMA_DAYS-day SMA.
+
+        Returns None when bars are unavailable (the gate fails open).
+        """
+        cache_key = datetime.now().strftime("%Y-%m-%d")
+        if cache_key in self._spy_regime_cache:
+            return self._spy_regime_cache[cache_key]
+        result: bool | None = None
+        try:
+            sma_days = self.config.REGIME_SMA_DAYS
+            start = (datetime.now() - timedelta(days=int(sma_days * 1.6) + 10)).strftime("%Y-%m-%d")
+            resp = self._session.get(
+                "https://data.alpaca.markets/v2/stocks/SPY/bars",
+                params={"timeframe": "1Day", "start": start, "limit": 10000, "adjustment": "split"},
+                headers={
+                    "APCA-API-KEY-ID": self._api_key,
+                    "APCA-API-SECRET-KEY": self._secret_key,
+                },
+            )
+            if resp.ok:
+                bars = resp.json().get("bars") or []
+                closes = [b["c"] for b in bars if b.get("c")]
+                if len(closes) >= sma_days:
+                    sma = sum(closes[-sma_days:]) / sma_days
+                    latest = closes[-1]
+                    result = latest > sma
+                    logger.info(
+                        f"Regime: SPY {latest:.2f} vs {sma_days}-day SMA {sma:.2f} "
+                        f"— {'ABOVE (risk-on)' if result else 'BELOW (risk-off)'}"
+                    )
+                else:
+                    logger.warning(f"Regime: only {len(closes)} SPY bars (need {sma_days}) — gate fails open")
+        except Exception as e:
+            logger.warning(f"Regime: SPY bars fetch failed ({e}) — gate fails open")
+        self._spy_regime_cache.clear()  # keep only today's entry
+        self._spy_regime_cache[cache_key] = result
+        return result
+
     # ── Phase 6a: Bid-Ask Spread Check ──────────────────────────
 
     def _get_spread_pct(self, ticker: str) -> float:
@@ -364,6 +409,9 @@ class ExecutionAgent:
         # Get SPY change for circuit breaker
         spy_change = self._get_spy_change()
 
+        # Check #14: SPY vs 200-day SMA regime gate
+        spy_above_sma = self._get_spy_regime()
+
         # Phase 6b: Get VIX level for volatility circuit breaker
         vix_level = self._get_vix_level()
 
@@ -445,6 +493,7 @@ class ExecutionAgent:
             sector=sector,
             entry_price=current_price,
             bypass_signal_filters=bypass_filters,
+            spy_above_sma=spy_above_sma,
         )
 
         if not validation["approved"]:

@@ -418,6 +418,30 @@ class RiskManager:
             return False
         return True
 
+    # ── Check #14: Market Regime Gate (SPY vs 200-day SMA) ─────────
+
+    def check_market_regime(self, spy_above_sma: bool | None, action: str = "BUY") -> bool:
+        """Return True if the market regime allows a NEW long entry.
+
+        Blocks BUYs when SPY is below its REGIME_SMA_DAYS-day SMA (bear-regime
+        filter, Faber SSRN-962461). Longs only; exits and shorts unaffected.
+        ``spy_above_sma=None`` means the data fetch failed — fail-open with a
+        warning, matching the liquidity/spread checks' unavailable-data policy.
+        """
+        if not self.config.REGIME_GATE_ENABLED:
+            return True
+        if action != "BUY":
+            return True
+        if spy_above_sma is None:
+            logger.warning("REGIME GATE: SPY SMA data unavailable — check skipped (fail-open)")
+            return True
+        if not spy_above_sma:
+            logger.warning(
+                f"REGIME GATE: SPY below its {self.config.REGIME_SMA_DAYS}-day SMA "
+                f"— blocking new LONG entries"
+            )
+        return spy_above_sma
+
     # ── Phase 6a: Bid-Ask Spread Validation ────────────────────
 
     def check_spread(self, spread_pct: float, portfolio: str = "main") -> bool:
@@ -806,6 +830,7 @@ class RiskManager:
         sector: str = "",
         entry_price: float = 0.0,
         bypass_signal_filters: bool = False,
+        spy_above_sma: bool | None = None,
     ) -> dict:
         """Run all pre-trade safety checks including new risk gates. Returns pass/fail with reasons.
 
@@ -851,6 +876,8 @@ class RiskManager:
             "spread_ok": True if bypass else (self.check_spread(spread_pct, portfolio) if spread_pct > 0 else True),
             # Phase 6b: Sector concentration
             "sector_ok": True if bypass else (self.check_sector_concentration(ticker, sector, account_value, entry_value) if sector else True),
+            # Check #14: Market regime gate — SPY vs 200-day SMA (longs only)
+            "regime_ok": True if bypass else self.check_market_regime(spy_above_sma, action),
         }
 
         all_passed = all(checks.values())

@@ -136,6 +136,55 @@ def test_market_health_spy_drop_blocks_longs_only(risk_manager):
     assert risk_manager.check_market_health(drop, "SELL", vix_level=10) is True
 
 
+# ─────────────────────────── Regime gate (check #14) ────────────────────────
+
+
+def test_regime_gate_spy_above_sma_passes(risk_manager):
+    assert risk_manager.check_market_regime(True, "BUY") is True
+
+
+def test_regime_gate_spy_below_sma_blocks_longs_only(risk_manager):
+    assert risk_manager.check_market_regime(False, "BUY") is False
+    assert risk_manager.check_market_regime(False, "SELL") is True
+
+
+def test_regime_gate_missing_data_fails_open(risk_manager):
+    assert risk_manager.check_market_regime(None, "BUY") is True
+
+
+def test_regime_gate_disabled_passes(risk_manager, monkeypatch):
+    monkeypatch.setattr(risk_manager.config, "REGIME_GATE_ENABLED", False)
+    assert risk_manager.check_market_regime(False, "BUY") is True
+
+
+def test_validate_trade_includes_regime_check(risk_manager, monkeypatch):
+    monkeypatch.setattr(risk_manager, "is_market_hours", lambda: True)
+    result = risk_manager.validate_trade(
+        ticker="ABC",
+        conviction=9.5,
+        stop_loss_pct=2.0,
+        take_profit_pct=8.0,
+        account_value=20000,
+        spy_above_sma=False,
+    )
+    assert result["approved"] is False
+    assert "regime_ok" in result["failures"]
+
+
+def test_validate_trade_bypass_skips_regime_check(risk_manager, monkeypatch):
+    monkeypatch.setattr(risk_manager, "is_market_hours", lambda: True)
+    result = risk_manager.validate_trade(
+        ticker="ABC",
+        conviction=9.5,
+        stop_loss_pct=2.0,
+        take_profit_pct=8.0,
+        account_value=20000,
+        spy_above_sma=False,
+        bypass_signal_filters=True,
+    )
+    assert result["checks"]["regime_ok"] is True
+
+
 # ─────────────────────────── Sector concentration ──────────────────────────
 
 
