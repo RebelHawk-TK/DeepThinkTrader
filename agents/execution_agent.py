@@ -1094,7 +1094,14 @@ class ExecutionAgent:
             # exit-managed (no stop, no TP, no time stop). Surface them loudly;
             # don't touch them — they may be deliberate manual positions.
             db_tickers = {t["ticker"] for t in open_trades}
-            unmanaged = sorted(positions - db_tickers)
+            external = (positions - db_tickers) & self.config.EXTERNAL_POSITIONS
+            unmanaged = sorted(positions - db_tickers - external)
+            if external:
+                logger.info(
+                    f"Known external position(s) held outside the bot "
+                    f"(EXTERNAL_POSITIONS): {', '.join(sorted(external))} — "
+                    f"not exit-managed, by design."
+                )
             if unmanaged:
                 logger.error(
                     f"UNMANAGED Alpaca position(s) with no DB trade row: "

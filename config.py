@@ -154,6 +154,13 @@ class Config:
     # window (no cutover). Separate from BASELINE_DATE (which only drives dashboard display).
     SLEEVE_DRAWDOWN_BASELINE: str = os.getenv("SLEEVE_DRAWDOWN_BASELINE", "")
     WATCHLIST: list[str] = os.getenv("WATCHLIST", "NVDA,TSLA,AAPL,AMD,SPY").split(",")
+    # Known external holds (2026-07-02). Alpaca positions the operator deliberately
+    # holds outside the bot (the ~$77k manual ETF basket — see docs/status_2026-06-30.md).
+    # Reconcile logs these at INFO instead of the UNMANAGED ERROR; the bot still never
+    # touches them, and sizing already excludes them via SIZING_NOTIONAL_CAP.
+    EXTERNAL_POSITIONS: set[str] = {
+        t.strip().upper() for t in os.getenv("EXTERNAL_POSITIONS", "").split(",") if t.strip()
+    }
     MAX_RISK_PER_TRADE: float = float(os.getenv(
         "MAX_RISK_PER_TRADE", str(_mode["MAX_RISK_PER_TRADE"])))
     MAX_DAILY_LOSS: float = float(os.getenv(

@@ -183,6 +183,25 @@ def test_reconcile_warns_on_unmanaged_alpaca_position(agent, monkeypatch, caplog
     assert "ZZZ" in caplog.text
 
 
+def test_reconcile_skips_whitelisted_external_positions(agent, monkeypatch, caplog):
+    monkeypatch.setattr(agent.config, "EXTERNAL_POSITIONS", {"IUSB"})
+    monkeypatch.setattr(
+        agent, "get_positions",
+        lambda: [
+            {"ticker": "IUSB", "quantity": 341, "current_price": 46.0, "unrealized_pnl": 0.0},
+            {"ticker": "ZZZ", "quantity": 10, "current_price": 5.0, "unrealized_pnl": 0.0},
+        ],
+    )
+    import logging
+    with caplog.at_level(logging.INFO):
+        agent.reconcile_open_trades()
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert "ZZZ" in errors[0].message
+    assert "IUSB" not in errors[0].message
+    assert any("IUSB" in r.message and r.levelno == logging.INFO for r in caplog.records)
+
+
 # ── Fix 4: exits record actual fills, not pre-close quotes ──────────────────
 
 def test_resolve_exit_fill_uses_fill_price(agent, monkeypatch):
