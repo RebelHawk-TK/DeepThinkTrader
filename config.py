@@ -74,7 +74,10 @@ class Config:
     # "conviction" = legacy multi-edge/LLM stack (walk_forward_entries PF 0.53 OOS, 0.66 at
     # zero cost). "quality_momentum" = above SMA-20 + revenue_growth>0 + profit_margin>0 +
     # up-day; its old "OOS PF 1.35" was a tz look-ahead artifact, corrected next-bar PF 0.98.
-    # Applies to the MAIN book only and is inert while MAIN_ENABLED=false.
+    # Accepts a comma-separated list of factor signals (2026-07-02) — entry fires if ANY
+    # fires. Validated rules: momentum_breakout (CI [1.67,4.22]) + relative_strength
+    # (CI [1.57,3.46]), both status_2026-06-25. Applies to the MAIN book only and is
+    # inert while MAIN_ENABLED=false.
     MAIN_SIGNAL: str = os.getenv("MAIN_SIGNAL", "conviction").lower()
 
     # Load mode preset, fall back to normal if invalid

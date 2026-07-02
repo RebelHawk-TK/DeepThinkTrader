@@ -482,6 +482,35 @@ class DeepThinkAgent:
         )
 
     @staticmethod
+    def _relative_strength_signal(report: dict) -> bool:
+        """MAIN entry rule — relative_strength. EXACT replica of the backtest
+        (backtest.signal_search 'relative_strength'), the second liquid-universe rule
+        clearing the bootstrap PF gate: 95% CI [1.57, 2.35, 3.46], 443 trades, PF>1 in
+        all three time-thirds (status_2026-06-25; deployed 2026-07-02 as a second
+        sleeve). Price within 10% of its 30-day high, volume > 1.5x average, up on
+        the day.
+
+        Fields + float-coercion mirror signal_search.load_candidates so live == backtest.
+        Caveat: validated in-sample over one ~3-month window; treat live as a forward test.
+        """
+        t = report.get("technicals") or {}
+
+        def _f(x, d=0.0):
+            try:
+                return float(x)
+            except (TypeError, ValueError):
+                return d
+
+        high30 = _f(t.get("high_30d"))
+        price = _f(t.get("current_price"))
+        return (
+            high30 > 0
+            and price >= 0.9 * high30
+            and _f(t.get("volume_ratio")) > 1.5
+            and _f(t.get("daily_change_pct")) > 0
+        )
+
+    @staticmethod
     def _regime_thresholds(
         vix: float, base_min_conv: float, base_min_edges: int
     ) -> tuple[float, int, str]:
@@ -555,13 +584,21 @@ class DeepThinkAgent:
             max_risk = self.config.MAX_RISK_PER_TRADE
             min_conv = self.config.MIN_CONVICTION
 
-        # Factor-signal mode: the main book uses a pure factor rule instead of the
+        # Factor-signal mode: the main book uses pure factor rule(s) instead of the
         # conviction/edge/LLM stack (which has no edge). When on, debate + Claude + the
-        # edge gates are skipped and the action is set by the selected signal below.
-        # momentum_breakout is the bootstrap-validated rule (status_2026-06-25);
-        # quality_momentum is the prior (gate-failing) rule, kept selectable.
-        MAIN_FACTOR_SIGNALS = ("quality_momentum", "momentum_breakout")
-        signal_mode = portfolio == "main" and self.config.MAIN_SIGNAL in MAIN_FACTOR_SIGNALS
+        # edge gates are skipped and the action is set by the selected signal(s) below.
+        # MAIN_SIGNAL accepts a comma-separated list (2026-07-02); entry fires if ANY
+        # selected rule fires, and the firing rule is named in the trade reasoning for
+        # per-signal attribution. momentum_breakout + relative_strength are the two
+        # bootstrap-validated rules (status_2026-06-25); quality_momentum is the prior
+        # (gate-failing) rule, kept selectable.
+        MAIN_FACTOR_SIGNALS = ("quality_momentum", "momentum_breakout", "relative_strength")
+        signal_names = [s.strip() for s in self.config.MAIN_SIGNAL.split(",") if s.strip()]
+        unknown_signals = [s for s in signal_names if s not in MAIN_FACTOR_SIGNALS and s != "conviction"]
+        if unknown_signals:
+            logger.error(f"MAIN_SIGNAL contains unknown signal(s) {unknown_signals} — ignoring them")
+        active_signals = [s for s in signal_names if s in MAIN_FACTOR_SIGNALS]
+        signal_mode = portfolio == "main" and bool(active_signals)
 
         # Regime-conditional thresholds: adapt the entry bar to volatility.
         # Calm markets reward modest edges; panic markets demand more (extracted to
@@ -783,24 +820,39 @@ class DeepThinkAgent:
             action = "HOLD"
             edge_reason = "BUY blocked: fundamental edge required (REQUIRE_FUNDAMENTAL_EDGE)"
 
-        # Factor-signal mode (main): the selected factor rule REPLACES the conviction/edge
+        # Factor-signal mode (main): the selected factor rule(s) REPLACE the conviction/edge
         # decision above as the entry rule. Risk gates, sizing and exits still apply
-        # downstream in the execution agent.
+        # downstream in the execution agent. With multiple signals, ANY firing rule is an
+        # entry — each is an independently validated edge; the union stays bounded by the
+        # position-count / daily-loss / sleeve caps downstream.
         if signal_mode:
-            if self.config.MAIN_SIGNAL == "momentum_breakout":
-                fired = self._momentum_breakout_signal(report)
-                signal_desc = "momentum_breakout: >SMA10&20 + vol>2x + day>3% + rsi<75"
-            else:  # quality_momentum
-                fired = self._quality_momentum_signal(report)
-                signal_desc = "quality_momentum: SMA20 + rev_growth>0 + margin>0 + up-day"
-            if fired:
+            SIGNAL_IMPLS = {
+                "momentum_breakout": (
+                    self._momentum_breakout_signal,
+                    "momentum_breakout: >SMA10&20 + vol>2x + day>3% + rsi<75",
+                ),
+                "quality_momentum": (
+                    self._quality_momentum_signal,
+                    "quality_momentum: SMA20 + rev_growth>0 + margin>0 + up-day",
+                ),
+                "relative_strength": (
+                    self._relative_strength_signal,
+                    "relative_strength: within 10% of 30d-high + vol>1.5x + up-day",
+                ),
+            }
+            fired_descs = [
+                desc for name in active_signals
+                for func, desc in (SIGNAL_IMPLS[name],)
+                if func(report)
+            ]
+            if fired_descs:
                 action = "BUY"
-                edge_reason = signal_desc
+                edge_reason = " ; ".join(fired_descs)
                 conviction = max(conviction, base_min_conv)  # let downstream gates pass
             else:
                 action = "HOLD"
-                edge_reason = f"{self.config.MAIN_SIGNAL}: no signal"
-            logger.info(f"{ticker}: [main {self.config.MAIN_SIGNAL}] -> {action} (conv {conviction})")
+                edge_reason = f"{'+'.join(active_signals)}: no signal"
+            logger.info(f"{ticker}: [main {'+'.join(active_signals)}] -> {action} (conv {conviction})")
 
         # Build reasoning summary
         top_bull = sorted(bullish, key=lambda x: x["strength"], reverse=True)[:2]
