@@ -28,7 +28,8 @@ class _RecordingTrader:
     instances: list["_RecordingTrader"] = []
 
     def __init__(self, user_id, api_key, secret_key, state,
-                 dynamic_watchlist=None, last_scan_date=None):
+                 dynamic_watchlist=None, last_scan_date=None,
+                 weekend_alerts=None):
         self.user_id = user_id
         self.api_key = api_key
         self.secret_key = secret_key

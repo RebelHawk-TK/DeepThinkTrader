@@ -1053,6 +1053,43 @@ _ALPACA_TF_MAP = {
     "1 D": "15Min", "5 D": "1H",
     "30 D": "1D", "90 D": "1D", "180 D": "1D", "1 Y": "1D", "3 Y": "1D",
 }
+_PERIOD_DAYS = {
+    "1 D": 1, "5 D": 5, "30 D": 30, "90 D": 90,
+    "180 D": 180, "1 Y": 365, "3 Y": 1095,
+}
+
+
+def _get_sleeve_history_period(days: int) -> dict | None:
+    """Bot-sleeve daily equity curve WITH dates, for the benchmarks chart.
+
+    Same construction as RiskManager._fetch_sleeve_equity_history (daily_pnl
+    seeded at SIZING_NOTIONAL_CAP since SLEEVE_DRAWDOWN_BASELINE) — the account
+    curve is ~83% manual ETF basket, so plotting it as "DeepThinkTrader" showed
+    the basket's drift as bot performance (2026-07-02). None when no cap is set.
+    """
+    cap = float(getattr(config, "SIZING_NOTIONAL_CAP", 0) or 0)
+    if cap <= 0:
+        return None
+    from datetime import datetime as _dt, timedelta as _td
+    window_start = (_dt.now() - _td(days=days)).strftime("%Y-%m-%d")
+    cutover = (getattr(config, "SLEEVE_DRAWDOWN_BASELINE", "") or "").strip()
+    start = max(window_start, cutover) if cutover else window_start
+    try:
+        with db._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT date, realized_pnl, unrealized_pnl FROM daily_pnl "
+                "WHERE user_id = ? AND date >= ? ORDER BY date ASC",
+                (USER_ID, start),
+            ).fetchall()
+    except Exception:
+        return None
+    dates, equity = [start], [cap]
+    running = 0.0
+    for r in rows:
+        running += (r[1] or 0.0)
+        dates.append(r[0])
+        equity.append(cap + running + (r[2] or 0.0))
+    return {"dates": dates, "equity": equity}
 
 _bench_period = st.segmented_control(
     "Period",
@@ -1220,12 +1257,38 @@ if _port_hist and _port_hist.get("equity") and benchmark_data:
                     opacity=0.8,
                 ))
 
-            fig_bench.add_trace(go.Scatter(
-                x=bot_dates,
-                y=bot_pct,
-                name="DeepThinkTrader",
-                line=dict(color="#e040fb", width=3),
-            ))
+            # Bot line = the SLEEVE curve when a sizing cap is active (the
+            # account curve is ~83% manual ETFs); account stays visible for
+            # context under an honest label. Daily granularity — daily_pnl has
+            # no intraday points, so on 1D/5D views the sleeve renders as a
+            # coarse line over the benchmarks' finer bars.
+            _sleeve_hist = _get_sleeve_history_period(_PERIOD_DAYS.get(_bench_period, 30))
+            _sleeve_pct: list[float] = []
+            if _sleeve_hist and len(_sleeve_hist["equity"]) >= 2:
+                _sl_base = _sleeve_hist["equity"][0]
+                _sleeve_pct = [((e - _sl_base) / _sl_base) * 100 for e in _sleeve_hist["equity"]]
+                fig_bench.add_trace(go.Scatter(
+                    x=bot_dates,
+                    y=bot_pct,
+                    name="Account (all holdings)",
+                    line=dict(color="#888", width=1.5, dash="dot"),
+                    opacity=0.7,
+                ))
+                _sl_dates = pd.to_datetime(_sleeve_hist["dates"]).tz_localize("US/Eastern")
+                fig_bench.add_trace(go.Scatter(
+                    x=_sl_dates,
+                    y=_sleeve_pct,
+                    name="DeepThinkTrader (sleeve)",
+                    line=dict(color="#e040fb", width=3),
+                    mode="lines+markers",
+                ))
+            else:
+                fig_bench.add_trace(go.Scatter(
+                    x=bot_dates,
+                    y=bot_pct,
+                    name="DeepThinkTrader",
+                    line=dict(color="#e040fb", width=3),
+                ))
 
             fig_bench.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.4)
 
@@ -1242,10 +1305,19 @@ if _port_hist and _port_hist.get("equity") and benchmark_data:
             apply_chart_theme(fig_bench)
             st.plotly_chart(fig_bench, use_container_width=True)
 
-            # Summary metrics
+            # Summary metrics — "vs bot" deltas compare against the sleeve
+            # when available, matching the chart's DeepThinkTrader line.
             bcols = st.columns(4)
-            bot_return = bot_pct[-1] if bot_pct else 0
-            bcols[0].metric("DeepThinkTrader", f"{bot_return:+.2f}%")
+            if _sleeve_pct:
+                bot_return = _sleeve_pct[-1]
+                bcols[0].metric(
+                    "DeepThinkTrader (sleeve)", f"{bot_return:+.2f}%",
+                    delta=f"account {bot_pct[-1]:+.2f}%" if bot_pct else None,
+                    delta_color="off",
+                )
+            else:
+                bot_return = bot_pct[-1] if bot_pct else 0
+                bcols[0].metric("DeepThinkTrader", f"{bot_return:+.2f}%")
             bot_start_ts = bot_dates.min()
             for i, (label, pct_series) in enumerate(benchmark_data.items()):
                 if i < 3:
