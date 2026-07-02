@@ -486,6 +486,21 @@ else:
 
 st.sidebar.markdown("---")
 
+# === ACTIVE ENTRY SIGNALS (main book, MAIN_SIGNAL — comma list since 2026-07-02) ===
+st.sidebar.subheader("Entry Signals (main)")
+_signal_descs = {
+    "momentum_breakout": ">SMA10&20 · vol>2x · day>3% · RSI<75",
+    "relative_strength": "≤10% off 30d-high · vol>1.5x · up-day",
+    "quality_momentum": "SMA20 · rev growth · margin · up-day (gate-failing)",
+    "conviction": "legacy multi-edge/LLM stack (no edge)",
+}
+for _sig in [s.strip() for s in config.MAIN_SIGNAL.split(",") if s.strip()]:
+    st.sidebar.markdown(f"**`{_sig}`**")
+    if _sig in _signal_descs:
+        st.sidebar.caption(_signal_descs[_sig])
+
+st.sidebar.markdown("---")
+
 # === PORTFOLIO FILTER ===
 st.sidebar.subheader("Portfolio")
 _portfolio_filter = st.sidebar.radio(
