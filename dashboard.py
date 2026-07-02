@@ -813,7 +813,27 @@ _regime = compute_regime(config)
 # True today-only P&L from Alpaca (resets at midnight ET). Falls back to 0
 # if the account response is missing last_equity for any reason.
 _today_pnl, _today_pnl_pct = compute_today_pnl(account)
-_drawdown_pct = compute_drawdown_from_peak(portfolio_hist) if portfolio_hist else max_drawdown_pct
+# Header drawdown must match what the HALT actually measures (2026-07-02).
+# With a sizing cap active, check_drawdown_halt runs on the BOT's sleeve curve
+# (daily_pnl seeded at the cap since SLEEVE_DRAWDOWN_BASELINE) — the
+# ETF-commingled account curve would show "near halt" while the halt logic is
+# nowhere near it. DB-only computation, no Alpaca call.
+_dd_scope = "account"
+_sizing_cap = float(getattr(config, "SIZING_NOTIONAL_CAP", 0) or 0)
+if _sizing_cap > 0:
+    try:
+        from utils.risk_manager import RiskManager as _SleeveRM
+        _sleeve_eq = _SleeveRM(user_id=USER_ID, db=db)._fetch_sleeve_equity_history(days=30)
+        _sleeve_peak = max(_sleeve_eq)
+        _drawdown_pct = (
+            max(0.0, (_sleeve_peak - _sleeve_eq[-1]) / _sleeve_peak * 100)
+            if _sleeve_peak > 0 else 0.0
+        )
+        _dd_scope = "sleeve"
+    except Exception:
+        _drawdown_pct = compute_drawdown_from_peak(portfolio_hist) if portfolio_hist else max_drawdown_pct
+else:
+    _drawdown_pct = compute_drawdown_from_peak(portfolio_hist) if portfolio_hist else max_drawdown_pct
 _halt_pct = float(getattr(config, "MAX_DRAWDOWN_HALT_PCT", 0.08)) * 100
 # Revenge-streak calc — count trailing consecutive losses.
 _streak = 0
@@ -868,6 +888,7 @@ render_kpi_row(
     total_exposure_pct=_exposure_pct,
     drawdown_from_peak_pct=_drawdown_pct,
     drawdown_halt_pct=_halt_pct,
+    drawdown_scope=_dd_scope,
 )
 
 # --- Full metrics (collapsed by default) ---------------------------

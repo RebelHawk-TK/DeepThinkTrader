@@ -81,8 +81,14 @@ def render_kpi_row(
     total_exposure_pct: float,
     drawdown_from_peak_pct: float,
     drawdown_halt_pct: float,
+    drawdown_scope: str = "account",
 ) -> None:
-    """Five headline numbers — the 'where do I stand right now?' row."""
+    """Five headline numbers — the 'where do I stand right now?' row.
+
+    drawdown_scope: "sleeve" when the value comes from the bot's own sleeve
+    curve (the same one check_drawdown_halt measures under a sizing cap);
+    "account" for the raw Alpaca account curve.
+    """
     cols = st.columns(5)
     cols[0].metric(
         "Equity",
@@ -119,7 +125,8 @@ def render_kpi_row(
     else:
         dd_label = f"-{drawdown_from_peak_pct:.1f}%"
         dd_delta = "well clear"
-    cols[4].metric("Drawdown", dd_label, delta=dd_delta, delta_color="off")
+    dd_title = "Drawdown (sleeve)" if drawdown_scope == "sleeve" else "Drawdown"
+    cols[4].metric(dd_title, dd_label, delta=dd_delta, delta_color="off")
 
 
 # ─────────────────────────── Risk & Memory row ──────────────────────────
