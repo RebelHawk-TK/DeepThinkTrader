@@ -19,7 +19,10 @@ def _spy_series(daily_return_std: float, n: int = 30) -> list[Bar]:
     Uses deterministic alternating returns (+σ, -σ) so tests are stable
     without a seeded RNG dependency.
     """
-    start = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    # Anchor to now: classify_regime only requests the trailing ~40 days, so
+    # fixed calendar dates age out of the window and the tests time-bomb
+    # (hard-coded 2026-03-01 passed in April, failed by mid-May).
+    start = datetime.now(timezone.utc) - timedelta(days=n)
     bars = []
     price = 500.0
     for i in range(n):

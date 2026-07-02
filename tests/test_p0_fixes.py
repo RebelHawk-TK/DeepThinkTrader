@@ -11,8 +11,24 @@ from config import Config
 
 
 def test_safety_gate_flags_exist_and_default_on():
-    assert Config.RISK_OF_RUIN_ENABLED is True
-    assert Config.REVENGE_GUARD_ENABLED is True
+    """The intent is 'the DEFAULTS are on' — not 'the operator's .env agrees'.
+
+    Config reads env at import (and load_dotenv re-reads .env on any reload),
+    and this machine's .env deliberately sets RISK_OF_RUIN_ENABLED=false
+    (Tom, 2026-05-29) — so asserting on the imported Config tests the override,
+    not the default. Assert the in-source defaults instead, which is what this
+    regression test was written to protect.
+    """
+    import inspect
+
+    import config as config_mod
+
+    src = inspect.getsource(config_mod)
+    assert 'os.getenv("RISK_OF_RUIN_ENABLED", "true")' in src
+    assert 'os.getenv("REVENGE_GUARD_ENABLED", "true")' in src
+    # And the flags still exist on the class (typo/rename guard).
+    assert isinstance(Config.RISK_OF_RUIN_ENABLED, bool)
+    assert isinstance(Config.REVENGE_GUARD_ENABLED, bool)
 
 
 def test_risk_of_ruin_bypass_when_disabled(risk_manager, monkeypatch):
