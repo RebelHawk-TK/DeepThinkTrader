@@ -488,12 +488,15 @@ st.sidebar.markdown("---")
 
 # === ACTIVE ENTRY SIGNALS (main book, MAIN_SIGNAL — comma list since 2026-07-02) ===
 st.sidebar.subheader("Entry Signals (main)")
-_signal_descs = {
-    "momentum_breakout": ">SMA10&20 · vol>2x · day>3% · RSI<75",
-    "relative_strength": "≤10% off 30d-high · vol>1.5x · up-day",
-    "quality_momentum": "SMA20 · rev growth · margin · up-day (gate-failing)",
-    "conviction": "legacy multi-edge/LLM stack (no edge)",
-}
+try:
+    from backtest import signals as entry_signals
+    _signal_descs = {k: entry_signals.get_signal_description(k) for k in entry_signals.SIGNAL_DESCRIPTIONS}
+    _signal_descs.setdefault("conviction", "legacy multi-edge/LLM stack (no edge)")
+except Exception:
+    _signal_descs = {
+        "momentum_breakout": "momentum_breakout: >SMA10&20 + vol>2x + day>3% + rsi<75",
+        "relative_strength": "relative_strength: within 10% of 30d-high + vol>1.5x + up-day",
+    }
 for _sig in [s.strip() for s in config.MAIN_SIGNAL.split(",") if s.strip()]:
     st.sidebar.markdown(f"**`{_sig}`**")
     if _sig in _signal_descs:

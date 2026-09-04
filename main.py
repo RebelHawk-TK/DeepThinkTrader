@@ -248,6 +248,7 @@ class DeepThinkTrader:
                 logger.info(
                     f"[{label}] Result for {ticker}: {result['status']} "
                     f"{'— ' + result.get('message', '') if result['status'] != 'EXECUTED' else ''}"
+                    f"{' sleeve=' + result.get('sleeve') if result.get('sleeve') else ''}"
                 )
 
             except Exception as e:
@@ -263,7 +264,9 @@ class DeepThinkTrader:
         logger.info(f"[{label}] Cycle complete: {len(executed)} executed, {len(blocked)} blocked, {len(holds)} hold")
         if executed:
             for e in executed:
-                logger.info(f"  [{label}] TRADED: {e['action']} {e['shares']}x {e['ticker']} @ ${e['entry_price']}")
+                sleeve = e.get("sleeve", "")
+                sleeve_tag = f" [{sleeve}]" if sleeve else ""
+                logger.info(f"  [{label}] TRADED: {e['action']} {e['shares']}x {e['ticker']} @ ${e['entry_price']}{sleeve_tag}")
         logger.info(f"{'='*60}\n")
 
         return results

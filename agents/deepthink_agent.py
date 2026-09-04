@@ -10,6 +10,9 @@ from utils.cycle_cache import claude_cache, debate_cache
 from utils.database import Database
 from utils.yahoo_fundamentals import YahooFundamentals
 
+# Single source of truth for production entry signals (Phase A refactor)
+from backtest import signals as entry_signals
+
 logger = logging.getLogger(__name__)
 
 
@@ -430,85 +433,26 @@ class DeepThinkAgent:
         )
         return not sent_passed
 
+    # Deprecated wrappers (Phase A): delegate to the single source of truth in
+    # backtest/signals.py. The old method names are kept for any external/test call
+    # sites; they will be removed in a follow-up cleanup once callers are migrated.
     @staticmethod
     def _quality_momentum_signal(report: dict) -> bool:
-        """MAIN entry rule (NO validated edge — see 2026-06-09 review): above SMA-20 +
-        revenue_growth>0 + profit_margin>0 + up on the day. The original "OOS PF 1.35"
-        was a timezone look-ahead artifact in the backtest; corrected next-bar PF is 0.98
-        (95% CI [0.71, 1.34], straddles 1.0). Inert while MAIN_ENABLED=false. Do not
-        re-trust without fresh forward data clearing the corrected validator.
-        """
-        t = report.get("technicals") or {}
-        fin = (report.get("fundamentals") or {}).get("financials") or {}
-        rev_growth = fin.get("revenue_growth")
-        margin = fin.get("profit_margin")
-        if rev_growth is None or margin is None:
-            return False
-        return (
-            bool(t.get("above_sma_20"))
-            and (t.get("daily_change_pct") or 0) > 0
-            and rev_growth > 0
-            and margin > 0
-        )
+        import warnings
+        warnings.warn("_quality_momentum_signal is deprecated; use entry_signals.quality_momentum", DeprecationWarning, stacklevel=2)
+        return entry_signals.quality_momentum(report)
 
     @staticmethod
     def _momentum_breakout_signal(report: dict) -> bool:
-        """MAIN entry rule — momentum_breakout. EXACT replica of the backtest
-        (backtest.signal_search 'momentum_breakout'), the only liquid-universe candidate
-        clearing the bootstrap PF gate: 95% CI [1.67, 2.74, 4.22], 280 trades, PF>1 in all
-        three time-thirds (status_2026-06-25). Above SMA-10 AND SMA-20, volume > 2x average,
-        up > 3% on the day, RSI < 75 (not yet overbought).
-
-        Fields + float-coercion mirror signal_search.load_candidates so live == backtest.
-        NOTE the RSI default is intentional fidelity, not a bug: a missing/unparseable
-        rsi_14 coerces to 0.0, and 0.0 < 75 passes — exactly as the validated backtest did.
-        Do not add a `0 <` lower guard; that would make live STRICTER than the backtest.
-        Caveat: validated in-sample over one ~3-month window; treat live as a forward test.
-        """
-        t = report.get("technicals") or {}
-
-        def _f(x, d=0.0):
-            try:
-                return float(x)
-            except (TypeError, ValueError):
-                return d
-
-        return (
-            bool(t.get("above_sma_10"))
-            and bool(t.get("above_sma_20"))
-            and _f(t.get("volume_ratio")) > 2
-            and _f(t.get("daily_change_pct")) > 3
-            and _f(t.get("rsi_14")) < 75
-        )
+        import warnings
+        warnings.warn("_momentum_breakout_signal is deprecated; use entry_signals.momentum_breakout", DeprecationWarning, stacklevel=2)
+        return entry_signals.momentum_breakout(report)
 
     @staticmethod
     def _relative_strength_signal(report: dict) -> bool:
-        """MAIN entry rule — relative_strength. EXACT replica of the backtest
-        (backtest.signal_search 'relative_strength'), the second liquid-universe rule
-        clearing the bootstrap PF gate: 95% CI [1.57, 2.35, 3.46], 443 trades, PF>1 in
-        all three time-thirds (status_2026-06-25; deployed 2026-07-02 as a second
-        sleeve). Price within 10% of its 30-day high, volume > 1.5x average, up on
-        the day.
-
-        Fields + float-coercion mirror signal_search.load_candidates so live == backtest.
-        Caveat: validated in-sample over one ~3-month window; treat live as a forward test.
-        """
-        t = report.get("technicals") or {}
-
-        def _f(x, d=0.0):
-            try:
-                return float(x)
-            except (TypeError, ValueError):
-                return d
-
-        high30 = _f(t.get("high_30d"))
-        price = _f(t.get("current_price"))
-        return (
-            high30 > 0
-            and price >= 0.9 * high30
-            and _f(t.get("volume_ratio")) > 1.5
-            and _f(t.get("daily_change_pct")) > 0
-        )
+        import warnings
+        warnings.warn("_relative_strength_signal is deprecated; use entry_signals.relative_strength", DeprecationWarning, stacklevel=2)
+        return entry_signals.relative_strength(report)
 
     @staticmethod
     def _regime_thresholds(
@@ -826,25 +770,13 @@ class DeepThinkAgent:
         # entry — each is an independently validated edge; the union stays bounded by the
         # position-count / daily-loss / sleeve caps downstream.
         if signal_mode:
-            SIGNAL_IMPLS = {
-                "momentum_breakout": (
-                    self._momentum_breakout_signal,
-                    "momentum_breakout: >SMA10&20 + vol>2x + day>3% + rsi<75",
-                ),
-                "quality_momentum": (
-                    self._quality_momentum_signal,
-                    "quality_momentum: SMA20 + rev_growth>0 + margin>0 + up-day",
-                ),
-                "relative_strength": (
-                    self._relative_strength_signal,
-                    "relative_strength: within 10% of 30d-high + vol>1.5x + up-day",
-                ),
-            }
-            fired_descs = [
-                desc for name in active_signals
-                for func, desc in (SIGNAL_IMPLS[name],)
-                if func(report)
-            ]
+            # Use the centralized registry (backtest/signals) — descriptions now come
+            # from the single source of truth (no more string duplication).
+            fired_descs = []
+            for name in active_signals:
+                func = entry_signals.get_signal_func(name) or (lambda r: False)
+                if func(report):
+                    fired_descs.append(entry_signals.get_signal_description(name))
             if fired_descs:
                 action = "BUY"
                 edge_reason = " ; ".join(fired_descs)

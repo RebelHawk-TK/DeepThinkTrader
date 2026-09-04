@@ -719,6 +719,16 @@ class ExecutionAgent:
                 reasoning=trade_summary[:200] if trade_summary else "",
             )
 
+            # Phase A: capture the firing sleeve for attribution (comes from deepthink
+            # reasoning or explicit key). Downstream (DB, dashboard, reflections) can use it.
+            sleeve = analysis.get("sleeve")
+            if not sleeve:
+                rs = (analysis.get("reasoning_summary") or analysis.get("edge_reason") or "")
+                for name in ("momentum_breakout", "relative_strength", "quality_momentum"):
+                    if name in rs:
+                        sleeve = name
+                        break
+
             return {
                 "status": "EXECUTED",
                 "ticker": ticker,
@@ -733,6 +743,7 @@ class ExecutionAgent:
                 "trade_id": trade_id,
                 "edges_firing": edges_firing,
                 "rr_ratio": rr_ratio,
+                "sleeve": sleeve,
             }
 
         except http_requests.HTTPError as e:

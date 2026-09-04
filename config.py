@@ -80,6 +80,11 @@ class Config:
     # inert while MAIN_ENABLED=false.
     MAIN_SIGNAL: str = os.getenv("MAIN_SIGNAL", "conviction").lower()
 
+    # Phase A: explicit registry of currently validated production sleeves.
+    # Used for attribution, validation, and future per-sleeve config.
+    # Only names listed here are considered "real" sleeves for the main book.
+    MAIN_SLEEVES: list[str] = ["momentum_breakout", "relative_strength"]
+
     # Load mode preset, fall back to normal if invalid
     _mode = TRADE_MODES.get(TRADE_MODE, TRADE_MODES["normal"])
 

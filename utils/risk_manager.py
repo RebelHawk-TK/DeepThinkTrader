@@ -60,6 +60,7 @@ class RiskManager:
         portfolio: str = "main",
         ticker: str | None = None,
         broker=None,
+        sleeve: str | None = None,
     ) -> int:
         """Calculate shares using fractional Kelly when enough history exists,
         falling back to fixed-risk sizing (1% of equity).
@@ -68,10 +69,15 @@ class RiskManager:
         scaled by a correlation multiplier: a candidate highly correlated
         with existing holdings gets 0.5x size. This is coarser than CVaR
         but cheaper to compute on every trade.
+
+        `sleeve` (e.g. "momentum_breakout") is accepted for attribution/logging
+        (Phase A foundation). It does not change sizing math yet.
         """
         if entry_price <= 0:
             return 0
         params = self._get_params(portfolio)
+        if sleeve:
+            logger.info(f"Position sizing for sleeve={sleeve}")
 
         # Try Kelly sizing if we have enough trade history
         stats = self.db.get_strategy_stats(self.user_id, portfolio)

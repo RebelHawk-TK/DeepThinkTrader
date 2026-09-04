@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from datetime import timedelta
 
+from backtest.signals import Cand, momentum_breakout_cand, relative_strength_cand, quality_momentum_cand
 from backtest.trade_replay import (
     DB_PATH,
     Entry,
@@ -33,37 +33,6 @@ from backtest.trade_replay import (
     fetch_hourly_bars,
     simulate_exit,
 )
-
-
-@dataclass
-class Cand:
-    ticker: str
-    ts: object
-    price: float
-    atr: float
-    daily_chg: float
-    vol_ratio: float
-    rsi: float
-    above10: bool
-    above20: bool
-    high30: float
-    low30: float
-    trend1h: str
-    rsi1h: float
-    news: float
-    reddit: float
-    catalyst: float
-    sa_sent: float
-    sa_bull: int
-    sa_bear: int
-    opt_bull: bool
-    opt_strength: float
-    pcr: float
-    rev_growth: float
-    d2e: float
-    margin: float
-    vix: float
-    breadth: float
 
 
 def _f(x, d=0.0):
@@ -112,13 +81,16 @@ def load_candidates() -> list[Cand]:
 
 
 # ── Candidate signals: pure functions of Cand (a long entry rule) ────────────
+# Production sleeves are imported from the single source of truth (backtest/signals.py).
+# Other candidates remain local (they are search experiments, not yet promoted sleeves).
 SIGNALS = {
-    "momentum_breakout": lambda c: c.above10 and c.above20 and c.vol_ratio > 2 and c.daily_chg > 3 and c.rsi < 75,
-    "relative_strength": lambda c: c.high30 > 0 and c.price >= 0.9 * c.high30 and c.vol_ratio > 1.5 and c.daily_chg > 0,
+    "momentum_breakout": momentum_breakout_cand,
+    "relative_strength": relative_strength_cand,
+    "quality_momentum": quality_momentum_cand,
+    # Experimental / search-only candidates (not production sleeves)
     "mean_reversion": lambda c: 0 < c.rsi < 35 and c.catalyst > 0 and c.above20,
     "options_flow": lambda c: c.opt_bull and c.opt_strength > 0.5,
     "catalyst_fresh": lambda c: c.catalyst > 0.5 and c.news > 2 and c.sa_sent > 0.1,
-    "quality_momentum": lambda c: c.above20 and c.daily_chg > 0 and c.rev_growth > 0 and c.margin > 0,
     "SA_bull_skew": lambda c: c.sa_bull >= 3 and c.sa_bull > 2 * max(1, c.sa_bear) and c.above20,
     "1h_trend_align": lambda c: c.trend1h == "bullish" and c.above20 and c.catalyst > 0,
 }
